@@ -1,4 +1,4 @@
-# CamosunROV_Pi — Testing UART to STM32F446
+# CamosunROV_Pi — Testing UART to STM32F446.
 
 Python script for testing UART communication between the Raspberry Pi (topside
 control link) and the STM32F446 (Nucleo) on the ROV, used to remotely toggle
