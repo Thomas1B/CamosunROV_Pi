@@ -4,6 +4,8 @@
 Testing pi camera
 
 
+in the venv, run "pip install -r requiredPackages.txt"
+
 libcamera must be installed to system use:
 sudo apt update
 sudo apt install -y python3-libcamera python3-picamera2 --no-install-recommends
