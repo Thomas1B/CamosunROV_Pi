@@ -1,10 +1,7 @@
-#!~/CamosunROV/ROV_Venv/bin/python3
+#!/home/pirov/CamosunROV_Pi/ROV_venv/bin/python3
 '''
 Testing UART communication between RPi and STM32F446.
-
-
 '''
-
 
 import serial
 import time
