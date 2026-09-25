@@ -5,7 +5,7 @@ Command frame (Pi -> STM32), 10 bytes:
     START | motor1..motor6 (i8 each) | cam_tilt_dc (i16) | CHECKSUM
 
 Telemetry frame (STM32 -> Pi), 18 bytes:
-    START | depth_dm (u16) | water_temp_dc (i16) | battery_dv (u16) | inside_temp_dc (i16)
+    START | depth_dm (i16) | water_temp_dc (i16) | battery_dv (u16) | inside_temp_dc (i16)
           | heading_dc (u16) | roll_dc (i16) | pitch_dc (i16)
           | leak (u8) | fault_flags (u8) | CHECKSUM
 
@@ -43,7 +43,7 @@ START_BYTE = 0xAA
 
 # struct format strings (excluding START and CHECKSUM, which we handle separately)
 _CMD_BODY_FMT = "<6bh"           # 6x motor(i8), cam_tilt_dc(i16)
-_TELEM_BODY_FMT = "<HhHhHhhBB"   # depth_dm(u16), water_temp_dc(i16), battery_dv(u16),
+_TELEM_BODY_FMT = "<hhHhHhhBB"   # depth_dm(u16), water_temp_dc(i16), battery_dv(u16),
                                  # inside_temp_dc(i16), heading_dc(u16), roll_dc(i16),
                                  # pitch_dc(i16), leak(u8), fault_flags(u8)
 
