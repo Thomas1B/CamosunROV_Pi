@@ -86,12 +86,12 @@ def rx_loop():
                 frames += 1
 
                 # Always report a live leak immediately, regardless of print rate.
-                if telem["leak"]:
-                    print("!!! LEAK DETECTED !!!")
-
                 if now - last_print >= PRINT_PERIOD:
+                    if telem["leak"]:
+                        print("!!! LEAK DETECTED !!!")
+                    else:
+                        print_telemetry(frames, telem)
                     last_print = now
-                    print_telemetry(frames, telem)
 
         elif now - last_rx > LINK_TIMEOUT:
             if connected:
