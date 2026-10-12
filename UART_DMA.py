@@ -5,8 +5,8 @@ Command frame (Pi -> STM32), 10 bytes:
     START | motor1..motor6 (i8 each) | cam_tilt_dc (i16) | CHECKSUM
 
 Telemetry frame (STM32 -> Pi), 18 bytes:
-    START | depth_dm (i16) | water_temp_dc (i16) | battery_dv (u16) | inside_temp_dc (i16)
-          | heading_dc (u16) | roll_dc (i16) | pitch_dc (i16)
+    START | depth_x100 (i16) | water_temp_x100 (i16) | battery_x100 (u16)
+          | inside_temp_x100 (i16) | heading_x100 (u16) | roll_x100 (i16) | pitch_x100 (i16)
           | leak (u8) | fault_flags (u8) | CHECKSUM
 
 cam_tilt_dc: camera tilt x10 (deci-degrees), 0 = level, + = up.
@@ -18,12 +18,15 @@ leak:        live leak-sensor state, 0 = dry, 1 = water detected right now.
 fault_flags: the STM32's latched SystemState_t bit flags (see FAULT_* below).
     `leak` says whether there is water NOW; FAULT_LEAK says there EVER was.
 
-heading/roll/pitch come from the BNO055 IMU, scaled x10 (deci-degrees) like
-everything else in this protocol.
+heading/roll/pitch come from the BNO055 IMU, scaled x100 (0.01 deg) like
+every other telemetry value.
 
 All multi-byte values are little-endian (native STM32/Cortex-M4 byte order).
-All sensor/command values are integers scaled x10 ("deci-units"); divide by
-10.0 to get real units (e.g. depth_dm=2995 -> 299.5 m).
+All telemetry (sensor) values are integers scaled x100, so 2 decimal places
+survive; divide by 100.0 to get real units (e.g. depth_x100=2995 -> 29.95 m).
+Ranges at x100: i16 fields -327.68..327.67, u16 fields 0.00..655.35 (the
+STM32 clamps anything outside that to the limit).
+The camera tilt COMMAND is still scaled x10 (deci-degrees).
 
 CHECKSUM is a simple additive checksum (sum of all body bytes, mod 256) --
 not a CRC. Good enough for a short, physically wired UART link where bit
@@ -43,9 +46,11 @@ START_BYTE = 0xAA
 
 # struct format strings (excluding START and CHECKSUM, which we handle separately)
 _CMD_BODY_FMT = "<6bh"           # 6x motor(i8), cam_tilt_dc(i16)
-_TELEM_BODY_FMT = "<hhHhHhhBB"   # depth_dm(u16), water_temp_dc(i16), battery_dv(u16),
-                                 # inside_temp_dc(i16), heading_dc(u16), roll_dc(i16),
-                                 # pitch_dc(i16), leak(u8), fault_flags(u8)
+_TELEM_BODY_FMT = "<hhHhHhhBB"   # depth_x100(i16), water_temp_x100(i16), battery_x100(u16),
+                                 # inside_temp_x100(i16), heading_x100(u16), roll_x100(i16),
+                                 # pitch_x100(i16), leak(u8), fault_flags(u8)
+
+TELEM_SCALE = 100.0  # telemetry wire value = real value x TELEM_SCALE
 
 CMD_FRAME_SIZE = 1 + struct.calcsize(_CMD_BODY_FMT) + 1      # 10
 TELEM_FRAME_SIZE = 1 + struct.calcsize(_TELEM_BODY_FMT) + 1  # 18
@@ -108,17 +113,17 @@ def parse_telem_frame(frame: bytes):
     if checksum8(body) != received_checksum:
         return None
 
-    (depth_dm, water_temp_dc, battery_dv, inside_temp_dc,
-     heading_dc, roll_dc, pitch_dc, leak, fault_flags) = struct.unpack(_TELEM_BODY_FMT, body)
+    (depth_x100, water_temp_x100, battery_x100, inside_temp_x100,
+     heading_x100, roll_x100, pitch_x100, leak, fault_flags) = struct.unpack(_TELEM_BODY_FMT, body)
 
     return {
-        "depth_m": depth_dm / 10.0,
-        "water_temp_c": water_temp_dc / 10.0,
-        "battery_v": battery_dv / 10.0,
-        "inside_temp_c": inside_temp_dc / 10.0,
-        "heading_deg": heading_dc / 10.0,
-        "roll_deg": roll_dc / 10.0,
-        "pitch_deg": pitch_dc / 10.0,
+        "depth_m": depth_x100 / TELEM_SCALE,
+        "water_temp_c": water_temp_x100 / TELEM_SCALE,
+        "battery_v": battery_x100 / TELEM_SCALE,
+        "inside_temp_c": inside_temp_x100 / TELEM_SCALE,
+        "heading_deg": heading_x100 / TELEM_SCALE,
+        "roll_deg": roll_x100 / TELEM_SCALE,
+        "pitch_deg": pitch_x100 / TELEM_SCALE,
         "leak": bool(leak),
         "fault_flags": fault_flags,
         "faults": decode_faults(fault_flags),
