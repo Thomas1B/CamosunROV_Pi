@@ -105,7 +105,7 @@ def rx_loop():
                 last_wait_print = now
                 print(f"Waiting for connection to STM32... "
                       f"({now - waiting_since:.0f} s)")
-
+ 
 
 rx_thread = threading.Thread(target=rx_loop, daemon=True)
 
@@ -126,7 +126,7 @@ try:
 
 except KeyboardInterrupt:
     print("\nStopping")
-    ser.write(build_cmd_frame(motors=[0, 0, 0, 0, 0, 0], cam_tilt_deg=0.0))
+    ser.write(build_cmd_frame(motors=[10, -10, 0, 0, 0, 0], cam_tilt_deg=33.0))
     ser.flush()   # make sure the stop frame actually leaves before closing
 
 finally:
