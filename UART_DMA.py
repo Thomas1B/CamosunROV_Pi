@@ -133,10 +133,30 @@ class TelemetryReader:
     Usage: call feed(data) with whatever bytes arrived from serial; it
     yields a parsed telemetry dict for each complete, checksum-valid frame
     found.
+
+    Packet-loss counting (checksum failures only):
+        checksum_errors -- telemetry frames lost to a checksum failure: a
+                           START byte followed by a full TELEM_FRAME_SIZE
+                           bytes whose checksum didn't match.
+        frames_ok       -- valid frames received.
+    Failures are not counted until the first valid frame (so starting the
+    script mid-frame doesn't count as a loss), and one corrupted frame is
+    counted once even if its body contains more 0xAA bytes. Frames that
+    never arrive at all are NOT counted -- checksum failures only.
     """
 
     def __init__(self):
         self._buf = bytearray()
+        self._pos = 0            # stream offset of _buf[0] (total bytes consumed so far)
+        self._bad_until = 0      # don't count another failure before this offset
+        self._synced = False     # True after the first valid frame
+        self.checksum_errors = 0
+        self.frames_ok = 0
+
+    def _consume(self, n: int):
+        """Drop n bytes from the front of the buffer, tracking the stream offset."""
+        del self._buf[:n]
+        self._pos += n
 
     def feed(self, data: bytes):
         self._buf.extend(data)
@@ -145,10 +165,10 @@ class TelemetryReader:
             # Find the next START byte, discarding anything before it.
             start_idx = self._buf.find(START_BYTE)
             if start_idx == -1:
-                self._buf.clear()
+                self._consume(len(self._buf))
                 return
             if start_idx > 0:
-                del self._buf[:start_idx]
+                self._consume(start_idx)
 
             # Do we have a full frame yet?
             if len(self._buf) < TELEM_FRAME_SIZE:
@@ -157,11 +177,16 @@ class TelemetryReader:
             candidate = bytes(self._buf[:TELEM_FRAME_SIZE])
             parsed = parse_telem_frame(candidate)
 
-            # Whether it parsed or not, consume the START byte we just
-            # examined so we don't loop on it forever, then keep scanning.
-            del self._buf[0:1]
-
-            if parsed is not None:
-                # also consume the rest of the frame we just used
-                del self._buf[: TELEM_FRAME_SIZE - 1]
+            if parsed is None:
+                # START + full length present, so this is a checksum failure.
+                if self._synced and self._pos >= self._bad_until:
+                    self.checksum_errors += 1
+                    self._bad_until = self._pos + TELEM_FRAME_SIZE
+                # Consume only the START byte and keep scanning, so a real
+                # frame starting inside this one is still found.
+                self._consume(1)
+            else:
+                self._synced = True
+                self.frames_ok += 1
+                self._consume(TELEM_FRAME_SIZE)
                 yield parsed

@@ -54,7 +54,8 @@ def print_telemetry(frames, telem):
         f"Roll: {telem['roll_deg']:.1f} deg  "
         f"Pitch: {telem['pitch_deg']:.1f} deg  "
         f"Leak: {'YES' if telem['leak'] else 'no'}  "
-        f"Faults: {faults}"
+        f"Faults: {faults}  "
+        f"Lost (checksum): {reader.checksum_errors}"
     )
 
 
