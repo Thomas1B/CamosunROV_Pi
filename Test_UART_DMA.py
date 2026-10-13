@@ -88,10 +88,7 @@ def rx_loop():
 
                 # Always report a live leak immediately, regardless of print rate.
                 if now - last_print >= PRINT_PERIOD:
-                    if telem["leak"]:
-                        print("!!! LEAK DETECTED !!!")
-                    else:
-                        print_telemetry(frames, telem)
+                    print_telemetry(frames, telem)
                     last_print = now
 
         elif now - last_rx > LINK_TIMEOUT:
@@ -106,7 +103,7 @@ def rx_loop():
                 last_wait_print = now
                 print(f"Waiting for connection to STM32... "
                       f"({now - waiting_since:.0f} s)")
- 
+
 
 rx_thread = threading.Thread(target=rx_loop, daemon=True)
 
