@@ -1,8 +1,8 @@
 """
 Fixed-length UART protocol, matching UART_DMA.h/.c on the STM32 side.
 
-Command frame (Pi -> STM32), 10 bytes:
-    START | motor1..motor6 (i8 each) | cam_tilt_dc (i16) | CHECKSUM
+Command frame (Pi -> STM32), 11 bytes:
+    START | motor1..motor6 (i8 each) | cam_tilt_dc (i16) | recover (u8) | CHECKSUM
 
 Telemetry frame (STM32 -> Pi), 18 bytes:
     START | depth_x100 (i16) | water_temp_x100 (i16) | battery_x100 (u16)
@@ -14,9 +14,18 @@ No clamping on the Pi -- values are sent as given and the STM32's motor/tilt
 control functions limit them. Values must still fit their wire field
 (motors -128..127, tilt -3276.8..3276.7 deg), otherwise struct.pack raises
 struct.error instead of sending a frame.
+recover:     0 = normal, 1 = clear a leak shutdown. The STM32 acts only on a
+             0 -> 1 change, and only if its leak sensor is dry; otherwise it
+             is ignored. Send 0 the rest of the time.
 leak:        live leak-sensor state, 0 = dry, 1 = water detected right now.
-fault_flags: the STM32's latched SystemState_t bit flags (see FAULT_* below).
-    `leak` says whether there is water NOW; FAULT_LEAK says there EVER was.
+fault_flags: the STM32's SystemState_t bit flags that are active RIGHT NOW
+             (see FAULT_* below). Each bit clears on its own when that fault
+             recovers (sensor answers again, Pi link comes back), EXCEPT
+             FAULT_LEAK, which stays set until a recover command succeeds.
+             While a sensor's bit is set, its telemetry field holds a stale
+             value -- ignore it.
+    `leak` says whether there is water NOW; FAULT_LEAK says the ROV is in
+    leak shutdown (thrusters and tilt servo off) until recovered.
 
 heading/roll/pitch come from the BNO055 IMU, scaled x100 (0.01 deg) like
 every other telemetry value.
@@ -45,23 +54,23 @@ import struct
 START_BYTE = 0xAA
 
 # struct format strings (excluding START and CHECKSUM, which we handle separately)
-_CMD_BODY_FMT = "<6bh"           # 6x motor(i8), cam_tilt_dc(i16)
+_CMD_BODY_FMT = "<6bhB"          # 6x motor(i8), cam_tilt_dc(i16), recover(u8)
 _TELEM_BODY_FMT = "<hhHhHhhBB"   # depth_x100(i16), water_temp_x100(i16), battery_x100(u16),
                                  # inside_temp_x100(i16), heading_x100(u16), roll_x100(i16),
                                  # pitch_x100(i16), leak(u8), fault_flags(u8)
 
 TELEM_SCALE = 100.0  # telemetry wire value = real value x TELEM_SCALE
 
-CMD_FRAME_SIZE = 1 + struct.calcsize(_CMD_BODY_FMT) + 1      # 10
+CMD_FRAME_SIZE = 1 + struct.calcsize(_CMD_BODY_FMT) + 1      # 11
 TELEM_FRAME_SIZE = 1 + struct.calcsize(_TELEM_BODY_FMT) + 1  # 18
 
 # Fault bit flags -- must match SystemState_t on the STM32.
 FAULT_NONE = 0
-FAULT_LEAK = 1 << 0    # leak detected
-FAULT_IMU = 1 << 1     # IMU failure or invalid data
-FAULT_DEPTH = 1 << 2   # depth sensor failure or out-of-range reading
-FAULT_TEMP = 1 << 3    # temperature sensor failure or out-of-range reading
-FAULT_UART = 1 << 4    # UART communication failure
+FAULT_LEAK = 1 << 0    # leak detected (latched until a recover command)
+FAULT_IMU = 1 << 1     # IMU not responding / reset itself (live)
+FAULT_DEPTH = 1 << 2   # depth sensor not responding (live)
+FAULT_TEMP = 1 << 3    # water temperature sensor not responding (live)
+FAULT_UART = 1 << 4    # Pi link lost: command timeout after link was up (live)
 
 FAULT_NAMES = {
     FAULT_LEAK: "LEAK",
@@ -82,10 +91,14 @@ def decode_faults(flags: int) -> list[str]:
     return [name for bit, name in FAULT_NAMES.items() if flags & bit]
 
 
-def build_cmd_frame(motors: list[int], cam_tilt_deg: float = 0.0) -> bytes:
+def build_cmd_frame(motors: list[int], cam_tilt_deg: float = 0.0,
+                    recover: bool = False) -> bytes:
     """
     motors:       list of 6 values, -100..100 (%) expected
     cam_tilt_deg: camera tilt in degrees, -90..90 expected, 0 = level, + = up
+    recover:      True to request clearing a leak shutdown. The STM32 only
+                  acts on a False -> True change, so send False normally and
+                  True for a few frames when you want to recover.
     Not clamped here -- the STM32 limits them.
     """
     if len(motors) != 6:
@@ -93,7 +106,7 @@ def build_cmd_frame(motors: list[int], cam_tilt_deg: float = 0.0) -> bytes:
     motors = [int(round(m)) for m in motors]
     cam_tilt_dc = int(round(cam_tilt_deg * 10))
 
-    body = struct.pack(_CMD_BODY_FMT, *motors, cam_tilt_dc)
+    body = struct.pack(_CMD_BODY_FMT, *motors, cam_tilt_dc, 1 if recover else 0)
     frame_checksum = checksum8(body)
     return bytes([START_BYTE]) + body + bytes([frame_checksum])
 
