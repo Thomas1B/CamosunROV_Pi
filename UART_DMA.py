@@ -208,3 +208,4 @@ class TelemetryReader:
                 self.frames_ok += 1
                 self._consume(TELEM_FRAME_SIZE)
                 yield parsed
+                
