@@ -29,7 +29,7 @@ import serial
 import time
 import threading
 
-from UART_DMA import build_cmd_frame, TelemetryReader, FAULT_LEAK
+from rov.UART_DMA import build_cmd_frame, TelemetryReader, FAULT_LEAK
 
 CMD_PERIOD = 1/50        # s -> 50 Hz command rate
 PRINT_PERIOD = 1/2       # s -> print telemetry at 2 Hz so the terminal stays readable
