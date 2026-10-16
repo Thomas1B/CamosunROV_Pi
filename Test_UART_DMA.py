@@ -43,8 +43,8 @@ RECOVER_FRAMES = 5       # frames sent with recover=1 per request (5 x 0.02 s = 
                          # acts on the 0 -> 1 edge only, so holding 1 briefly is safe.
 
 # Test command sent every frame
-TEST_MOTORS = [50, 0, -100, 30, 0, 0]   # %
-TEST_TILT_DEG = -15.0                   # deg
+TEST_MOTORS = [0, 0, 0, 0, 0, 0]   # %
+TEST_TILT_DEG = 0.0                   # deg
 
 ser = serial.Serial(
     port='/dev/serial0',   # use the PL011 UART: dtoverlay=disable-bt in config.txt
