@@ -66,6 +66,7 @@ def print_telemetry(frames, telem):
     faults = ", ".join(telem["faults"]) or "none"
     print(
         f"[{frames:6d}] "
+        f"Pressure: {telem['pressure_kpa']:.1f} kPa  "
         f"Depth: {telem['depth_m']:.2f} m  "
         f"Water: {telem['water_temp_c']:.2f} C  "
         f"Battery: {telem['battery_v']:.2f} V  "
