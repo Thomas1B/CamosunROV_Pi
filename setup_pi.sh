@@ -214,19 +214,33 @@ ok "'$SERVICE' starts at every boot"
 # ---------------------------------------------------------------- done
 echo
 echo "=============================================================================="
+echo " Setup finished."
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
-    echo " Setup finished. A REBOOT is needed (UART / group changes)."
-    echo " After the reboot main.py starts by itself -- watch it with: journalctl -u $SERVICE -f"
-    echo "=============================================================================="
-    read -r -p "Reboot now? [y/N] " answer
-    if [[ "${answer,,}" == "y" ]]; then
-        sudo reboot
+    echo " A REBOOT IS NEEDED for the UART / group changes to take effect."
+fi
+echo " After a reboot, main.py starts by itself at every power-on."
+echo "   systemctl status $SERVICE      is it running?"
+echo "   journalctl -u $SERVICE -f      live output (Ctrl+C stops watching)"
+echo "   sudo systemctl stop $SERVICE   before running ./main.py or Test_UART_DMA.py by hand"
+echo "=============================================================================="
+
+# Ask until the answer is y or n. No terminal (e.g. piped input ran out) counts as "n".
+while true; do
+    if ! read -r -p "Reboot now? (y/n) " answer; then
+        echo
+        [[ -n "$answer" ]] || answer="n"      # input ended: use what was typed, else "n"
     fi
+    case "${answer,,}" in
+        y|yes) echo "Rebooting..."; sudo reboot; exit 0 ;;
+        n|no)  break ;;
+        *)     echo "Please type y or n." ;;
+    esac
+done
+
+if [[ $REBOOT_NEEDED -eq 1 ]]; then
+    echo "Not rebooting. Remember to reboot (sudo reboot) before using the ROV --"
+    echo "the UART and group changes only apply after a reboot."
 else
     sudo systemctl restart "$SERVICE"
-    echo " Setup finished. main.py is running now and will start at every boot."
-    echo "   systemctl status $SERVICE      is it running?"
-    echo "   journalctl -u $SERVICE -f      live output (Ctrl+C stops watching)"
-    echo "   sudo systemctl stop $SERVICE   before running ./main.py or Test_UART_DMA.py by hand"
-    echo "=============================================================================="
+    echo "Not rebooting. Started the '$SERVICE' service now -- main.py is running."
 fi
