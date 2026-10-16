@@ -28,7 +28,7 @@ PRINT_PERIOD = 1 / 2           # s   telemetry + command lines printed at 2 Hz
 WAIT_PRINT_PERIOD = 2.0        # s   between "Waiting for ..." messages
 
 # ---------------- camera ----------------
-VIDEO_SIZE = (1280, 720)       # px  (v2 camera now, HQ camera later: picamera2 picks a matching mode)
+VIDEO_SIZE = (1920, 1080)       # px  (v2 camera now, HQ camera later: picamera2 picks a matching mode)
 FPS = 30                       # frames/s
 BITRATE = 4_000_000            # bit/s -- ~4 % of the 100 Mbit/s tether link
 IPERIOD = 15                   # frames between I-frames (0.5 s at 30 fps): faster recovery from loss
