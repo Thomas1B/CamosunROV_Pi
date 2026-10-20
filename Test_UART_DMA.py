@@ -76,7 +76,7 @@ def print_telemetry(frames, telem):
         f"Pitch: {telem['pitch_deg']:.2f} deg  "
         f"Leak: {'YES' if telem['leak'] else 'no'}  "
         f"Faults: {faults}  "
-        f"Lost (checksum): {reader.checksum_errors}"
+        f"Packets Lost (checksum): {reader.checksum_errors}"
     )
 
 
