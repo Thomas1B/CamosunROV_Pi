@@ -32,8 +32,8 @@ VIDEO_SIZE = (1920, 1080)       # px  (v2 camera now, HQ camera later: picamera2
 FPS = 30                       # frames/s
 BITRATE = 4_000_000            # bit/s -- ~4 % of the 100 Mbit/s tether link
 IPERIOD = 15                   # frames between I-frames (0.5 s at 30 fps): faster recovery from loss
-HFLIP = False                  # set True if the image is mirrored once mounted
-VFLIP = False                  # set True (with HFLIP) if the camera is mounted upside down
+HFLIP = True                  # set True if the image is mirrored once mounted
+VFLIP = True                  # set True (with HFLIP) if the camera is mounted upside down
 CAMERA_RETRY_DELAY = 2.0       # s   before reopening the camera after an error
 CAMERA_START_TIMEOUT = 5.0     # s   no first frame after starting -> restart the camera process
                                #     (the HQ camera can fail to start at boot without any error)
