@@ -15,6 +15,7 @@ watching, and the laptop can join at any time (SPS/PPS are repeated every
 I-frame so the decoder can start mid-stream).
 """
 
+import os
 import signal
 import sys
 import threading
@@ -61,13 +62,34 @@ def stream_once():
             failed.set()
         output.error_callback = on_error
 
+        # Frame watchdog. The camera can "start" without ever delivering a frame:
+        # e.g. the HQ camera at boot, when unicam logs "Failed to start media
+        # pipeline: -22" in dmesg. picamera2 raises no error then, so we count
+        # frames ourselves and treat "no frames for a while" as a failure.
+        last_frame = [time.monotonic()]
+        frames = [0]
+
+        def on_frame(request):
+            last_frame[0] = time.monotonic()
+            frames[0] += 1
+        picam2.post_callback = on_frame
+
         w, h = cfg.VIDEO_SIZE
         say(f"*** Streaming: {picam2.camera_properties.get('Model', '?')}  {w}x{h} @ {cfg.FPS} fps, "
             f"{cfg.BITRATE / 1e6:.1f} Mbit/s -> {cfg.LAPTOP_IP}:{cfg.VIDEO_PORT} ***")
         picam2.start_recording(encoder, output)
         recording = True
+        last_frame[0] = time.monotonic()
         while not failed.wait(1.0):
-            pass
+            waited = time.monotonic() - last_frame[0]
+            limit = cfg.CAMERA_STALL_TIMEOUT if frames[0] else cfg.CAMERA_START_TIMEOUT
+            if waited > limit:
+                what = "stopped sending frames" if frames[0] else "never sent a frame"
+                say(f"!!! Camera {what} ({waited:.0f} s) -- restarting the camera process")
+                # A stalled camera can also hang stop_recording()/close(), so skip
+                # the clean-up and exit: main.py starts a fresh camera process in
+                # 2 s, and the kernel releases the camera when this one exits.
+                os._exit(3)
         raise RuntimeError("stream output failed")
     finally:
         try:

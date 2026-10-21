@@ -35,6 +35,9 @@ IPERIOD = 15                   # frames between I-frames (0.5 s at 30 fps): fast
 HFLIP = False                  # set True if the image is mirrored once mounted
 VFLIP = False                  # set True (with HFLIP) if the camera is mounted upside down
 CAMERA_RETRY_DELAY = 2.0       # s   before reopening the camera after an error
+CAMERA_START_TIMEOUT = 5.0     # s   no first frame after starting -> restart the camera process
+                               #     (the HQ camera can fail to start at boot without any error)
+CAMERA_STALL_TIMEOUT = 3.0     # s   frames stopped mid-stream -> restart the camera process
 
 # ---------------- main.py supervisor ----------------
 RESTART_DELAY_MIN = 2.0        # s   before restarting a part that stopped
