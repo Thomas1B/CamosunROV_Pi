@@ -22,6 +22,8 @@ CMD_TIMEOUT = 0.25             # s   without a valid command packet -> thrusters
 STM32_TIMEOUT = 0.5            # s   without valid telemetry -> STM32 treated as not connected
                                #     (telemetry normally arrives every 0.02 s, so 0.5 s = 25 missed frames)
 HEARTBEAT_PERIOD = 0.1         # s   telemetry rate to the laptop while the STM32 is silent
+REF_UART_REPEATS = 3           # each new set of Bar30 reference values is sent to the STM32 this many
+                               # times (one per UART period), and again whenever the STM32 reconnects
 
 # ---------------- console printing (same style as Test_UART_DMA.py) ----------------
 PRINT_PERIOD = 1 / 2           # s   telemetry + command lines printed at 2 Hz

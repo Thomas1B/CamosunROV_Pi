@@ -6,6 +6,7 @@ The Pi sits in the ROV between the surface command centre and the STM32F446RE. I
 
 - receives control commands from the command centre over the tether (UDP),
 - forwards them to the STM32 at 50 Hz over UART, which drives the thrusters and camera tilt servo,
+- forwards the Bar30 reference values (surface pressure, water density, second-order calibration) from the command centre to the STM32,
 - forwards the STM32's telemetry (depth, temperatures, battery, attitude, leak, faults) back to the command centre as JSON,
 - streams live H.264 video from the Pi camera to the command centre.
 
@@ -136,6 +137,7 @@ All settings are in [`rov/settings.py`](rov/settings.py). After changing one, re
 | `CMD_TIMEOUT` | 0.25 s | No valid command for this long → thrusters 0 % |
 | `STM32_TIMEOUT` | 0.5 s | No valid telemetry for this long → STM32 treated as disconnected |
 | `HEARTBEAT_PERIOD` | 0.1 s | Telemetry period to the laptop while the STM32 is silent |
+| `REF_UART_REPEATS` | 3 | Each new set of Bar30 reference values is sent to the STM32 this many times, and again whenever the STM32 reconnects |
 | `VIDEO_SIZE` | 1920 × 1080 px | Camera resolution |
 | `FPS` | 30 frame/s | Camera frame rate |
 | `BITRATE` | 4 Mbit/s | H.264 bit rate (~4 % of the 100 Mbit/s tether link) |
@@ -163,6 +165,22 @@ UDP to port 5600, 16 bytes, little-endian, `struct` format `<2sBBH6bbxH`. Must m
 
 Packets with the wrong length, signature, version or CRC are dropped. When the packet says disarmed, the thrusters are sent to the STM32 as 0 %; the camera tilt still follows the command.
 
+### Reference packet: command centre → Pi
+
+The Bar30 reference values set in the command centre's CONNECT dialog or **File ▸ Reference Values…**. UDP to the same port as the command packet (5600), told apart by its signature. 16 bytes, little-endian, `struct` format `<2sBBHffH`. Must match `command_center_py/link.py`.
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `2s` | signature | `b"RF"` (commands are `b"RV"`) |
+| 2 | `u8` | version | `1` |
+| 3 | `u8` | flags | bit 0 = second-order pressure calibration on (water below 20 °C) |
+| 4 | `u16` | ref_seq | +1 each time the values change in the command centre |
+| 6 | `f32` | surface | Surface pressure reference, hPa (= mbar) |
+| 10 | `f32` | density | Water density, kg/m³ |
+| 14 | `u16` | crc16 | CRC-16/CCITT-FALSE over bytes 0 … 13 |
+
+Malformed or out-of-range packets (surface outside 800 … 1100 hPa, density outside 900 … 1100 kg/m³) are dropped. A new `ref_seq` is forwarded to the STM32 as a reference frame (below) and then reported back as `ref_ack` in the telemetry. The command centre resends the packet every second until it sees that `ack`, so the values still arrive if the STM32 connects later or the Pi restarts. They are also re-sent to the STM32 whenever it reconnects.
+
 ### Telemetry: Pi → command centre
 
 UDP to port 5601 at the IP address of the most recent valid command packet. One JSON object per datagram, sent at 50 Hz (one per STM32 frame):
@@ -171,7 +189,7 @@ UDP to port 5601 at the IP address of the most recent valid command packet. One 
 {"depth_m": 1.23, "pressure_kpa": 113.6, "water_c": 8.70, "internal_c": 31.2,
  "roll": 1.20, "pitch": -0.40, "yaw": 214.0, "voltage": 15.80,
  "leak": false, "faults": ["TEMP"], "fault_flags": 8, "stm32": true,
- "uart_errors": 0, "ack": 1234, "rx_cmds": 5678}
+ "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3}
 ```
 
 Units: m, kPa, °C, degrees, V.
@@ -179,10 +197,27 @@ Units: m, kPa, °C, degrees, V.
 - When a sensor's fault bit is set, its values are sent as `null`, because the STM32 is holding a stale reading.
 - When the STM32 is not answering, `"stm32"` is `false`, every sensor value is `null`, and heartbeats are sent at 10 Hz. That way the command centre can still tell that the tether and the Pi are working.
 - `ack` is the last command `seq` received, `rx_cmds` is the total number of valid commands, and `uart_errors` is the number of STM32 frames lost to checksum failures.
+- `ref_ack` is the `ref_seq` of the reference values last forwarded to the STM32 (`null` until the command centre has sent any).
 
 ### UART frames: Pi ⇄ STM32
 
 The frame format is defined in [`rov/UART_DMA.py`](rov/UART_DMA.py) and documented in the CamosunROV_STM32 README. `UART_DMA.py` **must be kept in sync with `UART_DMA.h/.c`** on the STM32 side.
+
+| Frame | Direction | Size | Start byte | When |
+|---|---|---|---|---|
+| Command | Pi → STM32 | 11 bytes | `0xAA` | Every 20 ms (50 Hz) |
+| Reference | Pi → STM32 | 10 bytes | `0xAB` | When the Bar30 reference values change (3 times), and when the STM32 reconnects |
+| Telemetry | STM32 → Pi | 20 bytes | `0xAA` | Every 20 ms |
+
+**Reference frame** (`START_REF | surface_hpa_x100 (u32) | density_x10 (u16) | flags (u8) | ref_id (u8) | CHECKSUM`):
+
+- `surface_hpa_x100` is the surface pressure in hPa × 100 (e.g. 101325 = 1013.25 hPa). It replaces the firmware's `SURFACE_PRESSURE`.
+- `density_x10` is the water density in kg/m³ × 10 (e.g. 10000 = 1000.0). It replaces `WATER_DENSITY`.
+- `flags` bit 0 turns the second-order calibration on. It replaces `second_order_calculation`.
+- `ref_id` goes up by 1 with each new set of values, so the STM32 can ignore the repeats.
+- The checksum is the same additive checksum as the other frames.
+
+It is written half a period (10 ms) after a command frame, in its own `write()`, so the STM32's idle-line DMA sees it as a separate frame and the 50 Hz command frames are not disturbed. **The STM32 firmware needs to be updated to use it.** The frame is deliberately shorter than a command frame: the current firmware only scans chunks of at least 11 bytes, so it ignores the frame and keeps using its `#define` values.
 
 ### Video
 

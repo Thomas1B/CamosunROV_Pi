@@ -2,6 +2,7 @@
 Bridge: command centre (Ethernet/UDP) <-> Raspberry Pi <-> STM32 (UART).
 
     laptop --UDP 5600, 16-byte command packet, 50 Hz--> Pi --UART 11-byte frame, 50 Hz--> STM32
+    laptop --UDP 5600, 16-byte reference packet-------> Pi --UART 10-byte frame, on change> STM32
     laptop <--UDP 5601, JSON telemetry, 50 Hz---------- Pi <--UART 20-byte frame, 50 Hz-- STM32
 
 Started by main.py in its own process. The UART side reuses rov/UART_DMA.py
@@ -29,14 +30,34 @@ COMMAND PACKET  laptop -> Pi  (matches command_center_py/link.py)
     Packets with the wrong length, magic, version or CRC are dropped.
     Disarmed (bit0 = 0) -> thrusters are sent to the STM32 as 0 %, tilt still follows.
 
+REFERENCE PACKET  laptop -> Pi  (matches command_center_py/link.py)
+    Bar30 depth-calculation settings, set in the command centre's CONNECT dialog or
+    File > Reference Values... Same port as the command packet, told apart by its magic.
+    UDP, CMD_PORT, 16 bytes, little-endian, struct "<2sBBHffH"
+    0  2s  magic     b"RF"
+    2  B   version   1
+    3  B   flags     bit0 = second-order pressure calibration on (water below 20 C)
+    4  H   ref_seq   +1 each time the values change in the command centre
+    6  f   surface   surface pressure reference, hPa (= mbar), float32
+    10 f   density   water density, kg/m^3, float32
+    14 H   crc16     CRC-16/CCITT-FALSE over bytes 0..13
+    Dropped if malformed or out of range (surface 800..1100 hPa, density 900..1100 kg/m^3).
+    A new ref_seq is forwarded to the STM32 as a 10-byte reference frame (see
+    rov/UART_DMA.py), REF_UART_REPEATS times, and re-sent whenever the STM32 reconnects.
+    Once forwarded, telemetry carries "ref_ack": ref_seq. The command centre resends
+    the packet every second until it sees that ack (e.g. while the STM32 is not
+    connected, or after the Pi restarts and ref_ack is null again).
+
 TELEMETRY  Pi -> laptop
     UDP, one JSON object per datagram, sent to the IP address the latest
     valid command packet came from, port TELEM_PORT.
     {"depth_m": 1.23, "pressure_kpa": 113.6, "water_c": 8.70, "internal_c": 31.2,
      "roll": 1.20, "pitch": -0.40, "yaw": 214.0, "voltage": 15.80,
      "leak": false, "faults": ["TEMP"], "fault_flags": 8, "stm32": true,
-     "uart_errors": 0, "ack": 1234, "rx_cmds": 5678}
+     "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3}
     SI units throughout: m, kPa, degC, deg, V.
+    ref_ack is the ref_seq of the reference values last forwarded to the STM32
+    (null until the command centre has sent any).
     A sensor whose fault bit is set (e.g. FAULT_DEPTH) has its value(s) sent
     as null, because the STM32 is holding a stale reading. While the STM32 is
     not answering at all, "stm32" is false and every sensor value is null; the
@@ -62,7 +83,7 @@ import time
 
 import serial
 
-from rov.UART_DMA import (build_cmd_frame, TelemetryReader,
+from rov.UART_DMA import (build_cmd_frame, build_ref_frame, TelemetryReader,
                           FAULT_LEAK, FAULT_IMU, FAULT_DEPTH, FAULT_TEMP)
 from rov import settings as cfg
 
@@ -73,6 +94,15 @@ CMD_MAGIC = b"RV"
 CMD_VERSION = 1
 FLAG_ARMED = 1 << 0
 FLAG_RECOVER = 1 << 1
+
+# ---------------- reference packet (must match command_center_py/link.py) ----------------
+REF_STRUCT = struct.Struct("<2sBBHff")        # 14 bytes, then a 2-byte CRC
+REF_PACKET_SIZE = REF_STRUCT.size + 2         # 16
+REF_MAGIC = b"RF"
+REF_VERSION = 1
+REF_FLAG_SECOND_ORDER = 1 << 0
+SURFACE_RANGE_HPA = (800.0, 1100.0)           # sanity limits, same as the command centre
+DENSITY_RANGE = (900.0, 1100.0)
 
 ZERO_MOTORS = [0, 0, 0, 0, 0, 0]
 STOP_FRAMES = 3                               # stop frames sent on exit, UART_PERIOD apart
@@ -106,6 +136,27 @@ def parse_command(pkt: bytes):
         return None
     motors, tilt = list(rest[:6]), rest[6]
     return seq, bool(flags & FLAG_ARMED), bool(flags & FLAG_RECOVER), motors, tilt
+
+
+def parse_reference(pkt: bytes):
+    """Returns (ref_seq, surface_hpa, density, second_order) for a valid packet, else None."""
+    if len(pkt) != REF_PACKET_SIZE:
+        return None
+    body, (crc,) = pkt[:REF_STRUCT.size], struct.unpack("<H", pkt[REF_STRUCT.size:])
+    if binascii.crc_hqx(body, 0xFFFF) != crc:
+        return None
+    magic, version, flags, ref_seq, surface, density = REF_STRUCT.unpack(body)
+    if magic != REF_MAGIC or version != REF_VERSION:
+        return None
+    if not (SURFACE_RANGE_HPA[0] <= surface <= SURFACE_RANGE_HPA[1]
+            and DENSITY_RANGE[0] <= density <= DENSITY_RANGE[1]):
+        return None
+    return ref_seq, round(surface, 2), round(density, 1), bool(flags & REF_FLAG_SECOND_ORDER)
+
+
+def describe_refs(refs):
+    surface, density, second = refs
+    return f"{surface:.2f} hPa, {density:.1f} kg/m^3, second-order {'ON' if second else 'OFF'}"
 
 
 def telem_to_json_dict(t):
@@ -146,6 +197,13 @@ class Bridge:
         self.motors = list(ZERO_MOTORS)
         self.tilt_deg = 0.0
 
+        # Bar30 reference values from the laptop, forwarded to the STM32
+        self.refs = None              # (surface_hpa, density, second_order), None until received
+        self.ref_seq = None           # laptop's ref_seq for self.refs
+        self.ref_id = 0               # UART ref_id, +1 per new set of values
+        self.ref_pending = 0          # reference frames still to send to the STM32
+        self.ref_acked = None         # ref_seq last forwarded -> telemetry "ref_ack"
+
         # latest telemetry from the STM32
         self.last_stm_time = float("-inf")
         self.stm_frames = 0
@@ -182,6 +240,9 @@ class Bridge:
                 if self.stop.is_set():
                     return
                 raise
+            if pkt[:2] == REF_MAGIC:
+                self.handle_reference(pkt)
+                continue
             cmd = parse_command(pkt)
             if cmd is None:
                 self.bad_cmds += 1
@@ -200,6 +261,38 @@ class Bridge:
                 self.recover = recover
                 self.motors = motors
                 self.tilt_deg = float(tilt)
+
+    def handle_reference(self, pkt):
+        ref = parse_reference(pkt)
+        if ref is None:
+            self.bad_cmds += 1
+            return
+        ref_seq, *values = ref
+        values = tuple(values)
+        with self.lock:
+            if ref_seq == self.ref_seq and values == self.refs:
+                return                        # a resend of what we already have
+            self.refs, self.ref_seq = values, ref_seq
+            self.ref_id = (self.ref_id + 1) & 0xFF
+            self.ref_pending = cfg.REF_UART_REPEATS
+            stm = self.stm_up(time.monotonic())
+        say(f">>> Reference values from command centre (#{ref_seq}): {describe_refs(values)}"
+            + ("" if stm else " -- will forward when the STM32 connects"))
+
+    def next_ref_frame(self, now):
+        """The reference frame to send this UART period, or None."""
+        with self.lock:
+            if self.ref_pending <= 0 or self.refs is None or not self.stm_up(now):
+                return None
+            self.ref_pending -= 1
+            frame = build_ref_frame(*self.refs, self.ref_id)
+            done = self.ref_pending == 0
+            if done:
+                self.ref_acked = self.ref_seq
+            refs, seq = self.refs, self.ref_seq
+        if done:
+            say(f"*** Reference values #{seq} sent to STM32: {describe_refs(refs)} ***")
+        return frame
 
     # ---------------- Pi -> STM32 ----------------
     def uart_tx_loop(self):
@@ -239,6 +332,13 @@ class Bridge:
             # One complete frame per write() -- the STM32 finds frames by idle line.
             self.ser.write(build_cmd_frame(motors=motors, cam_tilt_deg=tilt, recover=recover))
 
+            # New Bar30 reference values: their own frame, half a period later, so there
+            # is an idle gap on both sides and the 50 Hz command frames are not disturbed.
+            ref_frame = self.next_ref_frame(now)
+            if ref_frame is not None:
+                time.sleep(cfg.UART_PERIOD / 2)
+                self.ser.write(ref_frame)
+
             next_t += cfg.UART_PERIOD
             delay = next_t - time.monotonic()
             if delay < -cfg.UART_PERIOD:      # fell far behind (e.g. system stall): resync
@@ -268,6 +368,9 @@ class Bridge:
                     connected = True
                     say(f"*** Connected to STM32 -- telemetry received "
                         f"(waited {now - waiting_since:.1f} s) ***")
+                    with self.lock:           # it may have restarted: give it the reference values again
+                        if self.refs is not None:
+                            self.ref_pending = cfg.REF_UART_REPEATS
                 for t in frames:
                     self.stm_frames += 1
                     report_state_change(prev_telem, t)     # leak / faults: right away
@@ -302,6 +405,7 @@ class Bridge:
             ip = self.laptop_ip
             msg["ack"] = self.last_seq
             msg["rx_cmds"] = self.rx_cmds
+            msg["ref_ack"] = self.ref_acked
         if ip is None:
             return                            # no command centre has talked to us yet
         msg["uart_errors"] = self.reader.checksum_errors

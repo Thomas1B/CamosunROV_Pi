@@ -4,6 +4,9 @@ Fixed-length UART protocol, matching UART_DMA.h/.c on the STM32 side.
 Command frame (Pi -> STM32), 11 bytes:
     START | motor1..motor6 (i8 each) | cam_tilt_dc (i16) | recover (u8) | CHECKSUM
 
+Reference frame (Pi -> STM32), 10 bytes -- Bar30 reference values, sent only when they change:
+    START_REF | surface_hpa_x100 (u32) | density_x10 (u16) | flags (u8) | ref_id (u8) | CHECKSUM
+
 Telemetry frame (STM32 -> Pi), 20 bytes:
     START | pressure_x10 (u16) | depth_x100 (i16) | water_temp_x100 (i16) | battery_x100 (u16)
           | inside_temp_x100 (i16) | heading_x100 (u16) | roll_x100 (i16) | pitch_x100 (i16)
@@ -45,6 +48,29 @@ Ranges at x100: i16 fields -327.68..327.67, u16 fields 0.00..655.35 (the
 STM32 clamps anything outside that to the limit).
 The camera tilt COMMAND is still scaled x10 (deci-degrees).
 
+Reference frame (Bar30 depth calculation settings from the command centre):
+    START_REF        0xAB (NOT 0xAA) -- together with the 10-byte length this is how the
+                     STM32 tells it apart from an 11-byte command frame. Kept SHORTER than a
+                     command frame on purpose: the current firmware only scans chunks of at
+                     least CMD_FRAME_SIZE (11) bytes, so it ignores this frame completely.
+    surface_hpa_x100 surface barometric pressure reference, hPa (= mbar) x100, e.g. 101325
+                     for 1013.25 hPa -> MS5837_SetSurfaceReference(&bar30, x / 100.0f).
+                     Replaces the firmware's SURFACE_PRESSURE #define.
+    density_x10      water density, kg/m^3 x10, e.g. 10000 for 1000.0
+                     -> MS5837_SetFluidDensity(&bar30, x / 10.0f). Replaces WATER_DENSITY.
+    flags            bit0 = second-order pressure calibration on (MS5837 correction for
+                     water below 20 C) -> bar30.secondOrderCalculation.
+                     Replaces second_order_calculation.
+    ref_id           +1 (wrapping 255 -> 0) each time the values change, so the STM32 can
+                     ignore the repeats: the Pi sends each new set REF_UART_REPEATS times,
+                     and again whenever the STM32 (re)connects.
+    CHECKSUM         same additive checksum as the other frames (sum of body bytes, mod 256).
+    It is written in its own ser.write(), half a period after a command frame, so the
+    STM32's idle-line DMA always sees it as a separate frame. The 50 Hz command frames
+    are not delayed or skipped.
+    Until the STM32 firmware handles this frame it simply has to ignore it (wrong
+    START byte / length) -- it keeps using its #define values.
+
 CHECKSUM is a simple additive checksum (sum of all body bytes, mod 256) --
 not a CRC. Good enough for a short, physically wired UART link where bit
 errors are rare; it catches dropped/corrupted bytes but not e.g. two bytes
@@ -60,9 +86,11 @@ Keep this file in sync with UART_DMA.h/.c on the STM32 side.
 import struct
 
 START_BYTE = 0xAA
+START_REF_BYTE = 0xAB        # reference frame (Pi -> STM32)
 
 # struct format strings (excluding START and CHECKSUM, which we handle separately)
 _CMD_BODY_FMT = "<6bhB"          # 6x motor(i8), cam_tilt_dc(i16), recover(u8)
+_REF_BODY_FMT = "<IHBB"         # surface_hpa_x100(u32), density_x10(u16), flags(u8), ref_id(u8)
 _TELEM_BODY_FMT = "<HhhHhHhhBB"  # pressure_x10(u16), depth_x100(i16), water_temp_x100(i16), battery_x100(u16),
                                  # inside_temp_x100(i16), heading_x100(u16), roll_x100(i16),
                                  # pitch_x100(i16), leak(u8), fault_flags(u8)
@@ -72,6 +100,9 @@ PRESSURE_SCALE = 10.0        # except pressure: wire value = kPa x PRESSURE_SCAL
 
 CMD_FRAME_SIZE = 1 + struct.calcsize(_CMD_BODY_FMT) + 1      # 11
 TELEM_FRAME_SIZE = 1 + struct.calcsize(_TELEM_BODY_FMT) + 1  # 20
+REF_FRAME_SIZE = 1 + struct.calcsize(_REF_BODY_FMT) + 1      # 10 (must stay < CMD_FRAME_SIZE)
+
+REF_FLAG_SECOND_ORDER = 1 << 0
 
 # Fault bit flags -- must match SystemState_t on the STM32.
 FAULT_NONE = 0
@@ -118,6 +149,18 @@ def build_cmd_frame(motors: list[int], cam_tilt_deg: float = 0.0,
     body = struct.pack(_CMD_BODY_FMT, *motors, cam_tilt_dc, 1 if recover else 0)
     frame_checksum = checksum8(body)
     return bytes([START_BYTE]) + body + bytes([frame_checksum])
+
+
+def build_ref_frame(surface_hpa: float, density: float, second_order: bool, ref_id: int) -> bytes:
+    """
+    surface_hpa:  surface pressure reference, hPa (= mbar), e.g. 1013.25
+    density:      water density, kg/m^3, e.g. 1000.0
+    second_order: True = MS5837 second-order calibration on (water below 20 C)
+    ref_id:       0..255, +1 each time the values change
+    """
+    body = struct.pack(_REF_BODY_FMT, int(round(surface_hpa * 100)), int(round(density * 10)),
+                       REF_FLAG_SECOND_ORDER if second_order else 0, ref_id & 0xFF)
+    return bytes([START_REF_BYTE]) + body + bytes([checksum8(body)])
 
 
 def parse_telem_frame(frame: bytes):
