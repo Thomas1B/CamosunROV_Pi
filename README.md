@@ -42,7 +42,7 @@ Then, on the fresh Raspberry Pi OS install (Lite or Desktop), logged in as `piro
 
 ```bash
 cd ~
-git clone <repo-url>
+git clone https://github.com/Thomas1B/CamosunROV_Pi.git
 cd CamosunROV_Pi
 bash setup_pi.sh          # run as your normal user, NOT with sudo
 ```
