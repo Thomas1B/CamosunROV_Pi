@@ -54,8 +54,11 @@ TELEMETRY  Pi -> laptop
     {"depth_m": 1.23, "pressure_kpa": 113.6, "water_c": 8.70, "internal_c": 31.2,
      "roll": 1.20, "pitch": -0.40, "yaw": 214.0, "voltage": 15.80,
      "leak": false, "faults": ["TEMP"], "fault_flags": 8, "stm32": true,
-     "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3}
+     "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3, "video_cut": false}
     SI units throughout: m, kPa, degC, deg, V.
+    video_cut is true while the camera stream is deliberately off because of a
+    leak (see LEAK VIDEO CUT-OFF), so the command centre can tell that apart
+    from a camera or network failure.
     ref_ack is the ref_seq of the reference values last forwarded to the STM32
     (null until the command centre has sent any).
     A sensor whose fault bit is set (e.g. FAULT_DEPTH) has its value(s) sent
@@ -69,6 +72,14 @@ FAILSAFE
     Frames keep going to the STM32 at 50 Hz regardless, so the STM32's own
     UART timeout only trips if this program itself dies.
     On exit (Ctrl+C or systemctl stop) a stop frame is sent.
+
+LEAK VIDEO CUT-OFF
+    While a telemetry frame shows leak = 1 or FAULT_LEAK set, the shared
+    video_enabled flag (main.py) is cleared and the camera process stops
+    streaming. The STM32 only clears FAULT_LEAK after a recover command
+    arrives with the sensor dry, so the stream restarts when a recover
+    succeeds. A recover sent while still wet is refused by the STM32 and the
+    video stays off.
 """
 
 import binascii
@@ -181,10 +192,18 @@ def telem_to_json_dict(t):
     return out
 
 
+def leak_shutdown(t):
+    """True while the video must stay off: water detected now, or the STM32's
+    latched leak shutdown (FAULT_LEAK) not yet cleared by a recover command."""
+    return bool(t["leak"]) or bool(t["fault_flags"] & FAULT_LEAK)
+
+
 class Bridge:
-    def __init__(self):
+    def __init__(self, video_enabled=None):
         self.stop = threading.Event()
         self.lock = threading.Lock()
+        # Shared with the camera process (see main.py). None when run without main.py.
+        self.video_enabled = video_enabled
 
         # latest command from the laptop
         self.laptop_ip = None
@@ -253,7 +272,13 @@ class Bridge:
                 if armed != self.armed:
                     say(f">>> {'ARMED' if armed else 'DISARMED'} by command centre")
                 if recover and not self.recover:
-                    say(">>> Recover command from command centre (clears a leak shutdown if dry)")
+                    t = self.latest_telem if self.stm_up(time.monotonic()) else None
+                    if t is not None and t["leak"]:
+                        say(">>> Recover command from command centre REFUSED -- leak sensor "
+                            "still WET, video stays off. Release and press recover again once dry")
+                    else:
+                        say(">>> Recover command from command centre (clears a leak shutdown "
+                            "and restarts video if dry)")
                 self.last_cmd_time = time.monotonic()
                 self.last_seq = seq
                 self.rx_cmds += 1
@@ -374,6 +399,7 @@ class Bridge:
                 for t in frames:
                     self.stm_frames += 1
                     report_state_change(prev_telem, t)     # leak / faults: right away
+                    self.update_video(t)
                     prev_telem = t
                     with self.lock:
                         self.last_stm_time = now
@@ -400,7 +426,32 @@ class Bridge:
                     msg.update({"faults": [], "fault_flags": None, "stm32": False})
                     self.send_telem(msg)
 
+    def update_video(self, t):
+        """Cuts the camera stream on a leak; restarts it once the shutdown is cleared.
+
+        Works from the absolute state of every frame (not only changes), so a ROV
+        that is already wet or still latched when the STM32 link comes up, or
+        after this process restarts, has its video cut on the very first frame.
+        FAULT_LEAK only clears after a recover command with a dry sensor, so the
+        video comes back exactly when a recover succeeds. If the STM32 link is
+        lost, the video stays in whatever state it was in.
+        """
+        if self.video_enabled is None:
+            return
+        cut = leak_shutdown(t)
+        on = self.video_enabled.is_set()
+        if cut and on:
+            self.video_enabled.clear()
+            say("!!! LEAK -- video stream CUT. Recover (with the sensor dry) restarts it !!!")
+        elif not cut and not on:
+            self.video_enabled.set()
+            say("*** Leak shutdown cleared -- restarting video stream ***")
+
+    def video_cut(self):
+        return self.video_enabled is not None and not self.video_enabled.is_set()
+
     def send_telem(self, msg):
+        msg["video_cut"] = self.video_cut()
         with self.lock:
             ip = self.laptop_ip
             msg["ack"] = self.last_seq
@@ -503,13 +554,13 @@ def report_state_change(prev, telem):
         say(f"*** Faults changed: {faults} ***")
 
 
-def run():
-    """Process entry point used by main.py."""
+def run(video_enabled=None):
+    """Process entry point used by main.py. video_enabled: the shared leak video flag."""
     def on_sigterm(signum, frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, on_sigterm)
     try:
-        bridge = Bridge()
+        bridge = Bridge(video_enabled)
     except KeyboardInterrupt:
         return
     except serial.SerialException as exc:

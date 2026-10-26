@@ -19,7 +19,6 @@ It works together with **CamosunROV_STM32** (motor control and sensors) and **Ca
 | Part | Notes |
 |---|---|
 | Raspberry Pi 4 | Raspberry Pi OS (Trixie), Lite or Desktop, user `pirov`, repo at `/home/pirov/CamosunROV_Pi` |
-| STM32F446RE | Runs CamosunROV_STM32. Connected to the Pi's PL011 UART (`/dev/serial0`) |
 | Camera | Camera Module v2 (IMX219) now, HQ Camera (IMX477) later. No code changes needed to swap |
 | Tether | Blue Robotics Fathom tether, RJ45 on the Pi's `eth0` and on the command centre |
 | Battery | Blue Robotics Li-ion 4S 18 Ah (14.8 V nominal) |
@@ -31,14 +30,43 @@ It works together with **CamosunROV_STM32** (motor control and sensors) and **Ca
 | GPIO14 / TXD (header pin 8) | → | UART RX |
 | GPIO15 / RXD (header pin 10) | ← | UART TX |
 | GND (header pin 6) | — | GND |
+| 5V (header pin 4) | — | 5V |
 
 ---
 
 ## Setup
 
-When flashing the SD card in Raspberry Pi Imager, set the **username to `pirov`**. The first line of `main.py` and `Test_UART_DMA.py` points to `/home/pirov/CamosunROV_Pi/ROV_venv/bin/python3`, so with any other username, or with the repo cloned somewhere else, `./main.py` fails with "bad interpreter". The hostname can be anything; nothing in the code uses it. The password can be anything too, but remember it: `setup_pi.sh` asks for it once so it can use `sudo`.
+### 1. Flash the SD card
 
-Then, on the fresh Raspberry Pi OS install (Lite or Desktop), logged in as `pirov` and connected to the internet over Wi-Fi:
+Flash Raspberry Pi OS (Lite or Desktop) with Raspberry Pi Imager. After choosing the OS and SD card, open the OS customisation settings (**Edit Settings**) and set:
+
+| Setting | Value |
+|---|---|
+| Hostname | e.g. `camosunrov` |
+| Username / password | **`pirov`** / your choice |
+| Wireless LAN | Wi-Fi network name, password, and country `CA` |
+| Services tab | **Enable SSH**, use password authentication |
+
+- **Username must be `pirov`.** The first line of `main.py` and `Test_UART_DMA.py` points to `/home/pirov/CamosunROV_Pi/ROV_venv/bin/python3`, so with any other username, or with the repo cloned somewhere else, `./main.py` fails with "bad interpreter".
+- **Hostname** can be anything; nothing in the code uses it, but you need it to connect over SSH.
+- **Password** can be anything, but remember it: `setup_pi.sh` asks for it once so it can use `sudo`, and SSH asks for it every time you connect.
+- **Wi-Fi** is needed for the first setup, to download the code and packages.
+- **SSH** is only needed if you have no monitor and keyboard for the Pi, but turn it on anyway: it is the easiest way to check on the Pi later, including over the tether.
+
+### 2. Open a terminal on the Pi
+
+Boot the Pi and give it 1 min to 2 min to start and join the Wi-Fi. Then either:
+
+- **With a monitor and keyboard:** log in as `pirov` (on Desktop, open a terminal), or
+- **Headless, from a laptop on the same Wi-Fi network:** open a terminal (PowerShell on Windows, Terminal on macOS or Linux) and connect over SSH:
+
+  ```bash
+  ssh pirov@camosunrov.local      # use your hostname
+  ```
+
+  Answer `yes` the first time it asks about the host key, then enter the password. If `camosunrov.local` is not found (some school and campus networks block it), look up the Pi's IP address in the router's list of connected devices and use `ssh pirov@<that IP address>` instead.
+
+### 3. Run the setup script
 
 ```bash
 cd ~
@@ -55,12 +83,21 @@ bash setup_pi.sh          # run as your normal user, NOT with sudo
 4. Creates the `rov-tether` NetworkManager profile: `eth0` = `192.168.2.2/24`
 5. Creates the `ROV_venv` virtual environment (with system site packages, so it uses the apt camera stack) and installs `pyserial`
 6. Makes `main.py` and `Test_UART_DMA.py` executable and strips Windows line endings from their first line
-7. Disables services the ROV does not need, for a faster boot
+7. Disables services the ROV does not need, for a faster boot (SSH and Wi-Fi stay on)
 8. Installs and enables the `rov` systemd service so `main.py` starts at every power-on
 
-It then asks whether to reboot. **A reboot is required** the first time for the UART and group changes to take effect.
+It then asks whether to reboot. **A reboot is required** the first time for the UART and group changes to take effect. Over SSH, the session drops when the Pi reboots; that is expected. Wait about 1 min, then connect again.
 
 The command centre side (laptop IP and firewall) is covered in the CamosunROV_CommandCentre README.
+
+### Connecting after setup
+
+| From | Laptop setup | Command |
+|---|---|---|
+| Wi-Fi (on the bench) | Same Wi-Fi network as the Pi | `ssh pirov@camosunrov.local` |
+| Tether (ROV in the water) | Laptop's Ethernet port set to `192.168.2.1/24`, see the CamosunROV_CommandCentre README | `ssh pirov@192.168.2.2` |
+
+Over the tether, SSH runs alongside the command centre, so you can watch `journalctl -u rov -f` during a dive. After re-flashing the SD card, SSH refuses to connect with a "host key has changed" warning, because the Pi now has a new key. Clear the old one on the laptop with `ssh-keygen -R camosunrov.local` and `ssh-keygen -R 192.168.2.2`, then connect again.
 
 ---
 
@@ -70,7 +107,7 @@ The command centre side (laptop IP and firewall) is covered in the CamosunROV_Co
 
 ### Optional: checking on the service
 
-You only need these commands if you want to check on the service or control it. None of them are part of normal use.
+You only need these commands if you want to check on the service or control it. None of them are part of normal use. Run them on the Pi, directly or over SSH (see [Connecting after setup](#connecting-after-setup)).
 
 | If you want to… | Run |
 |---|---|
@@ -189,7 +226,7 @@ UDP to port 5601 at the IP address of the most recent valid command packet. One 
 {"depth_m": 1.23, "pressure_kpa": 113.6, "water_c": 8.70, "internal_c": 31.2,
  "roll": 1.20, "pitch": -0.40, "yaw": 214.0, "voltage": 15.80,
  "leak": false, "faults": ["TEMP"], "fault_flags": 8, "stm32": true,
- "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3}
+ "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3, "video_cut": false}
 ```
 
 Units: m, kPa, °C, degrees, V.
@@ -198,6 +235,7 @@ Units: m, kPa, °C, degrees, V.
 - When the STM32 is not answering, `"stm32"` is `false`, every sensor value is `null`, and heartbeats are sent at 10 Hz. That way the command centre can still tell that the tether and the Pi are working.
 - `ack` is the last command `seq` received, `rx_cmds` is the total number of valid commands, and `uart_errors` is the number of STM32 frames lost to checksum failures.
 - `ref_ack` is the `ref_seq` of the reference values last forwarded to the STM32 (`null` until the command centre has sent any).
+- `video_cut` is `true` while the Pi has deliberately stopped the camera stream because of a leak (see Safety behaviour), so the command centre can tell that apart from a camera or network fault.
 
 ### UART frames: Pi ⇄ STM32
 
@@ -229,6 +267,7 @@ The Pi camera feed is H.264, encoded on the Pi 4's hardware encoder and sent as 
 
 - **Command failsafe:** if no valid command packet arrives for 0.25 s (for example, the tether is unplugged or the laptop crashes), the Pi sends 0 % to all thrusters and holds the current tilt.
 - **Leak shutdown:** the STM32 cuts the thrusters and the tilt servo. It stays shut down until the sensor is dry *and* the command centre sends a recover command.
+- **Leak video cut-off:** as soon as a telemetry frame shows the leak sensor wet or the leak shutdown latched (`FAULT_LEAK`), the Pi stops the camera stream and closes the camera. When a recover command clears the shutdown (sensor dry), the stream restarts by itself within about 1 s to 2 s. A recover sent while the sensor is still wet is refused, and the video stays off; release recover and press it again once dry. If the STM32 link drops during a leak, the video stays off.
 - **Clean exit:** Ctrl+C or `systemctl stop rov` sends three stop frames (thrusters 0 %, camera level) before the UART closes.
 - **Process isolation:** the bridge and the camera run as separate processes (`multiprocessing`), so a camera crash or hang cannot affect thruster control.
 

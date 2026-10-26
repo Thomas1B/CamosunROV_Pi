@@ -7,7 +7,9 @@ Starts the two parts of the ROV software, each in its own process:
     camera  (rov/camera.py)  Pi camera -> H.264 video stream to the command centre
 
 Separate processes so a camera crash or hang can never stop thruster control,
-and video work can't disturb the 50 Hz STM32 timing. If either part stops,
+and video work can't disturb the 50 Hz STM32 timing. They share one flag,
+video_enabled: the bridge clears it on a leak and the camera stops streaming
+until a recover command clears the leak shutdown. If either part stops,
 main.py restarts it (after 2 s, backing off to 10 s if it keeps failing);
 the other part keeps running.
 
@@ -53,15 +55,16 @@ def say(msg):
 
 
 class Part:
-    def __init__(self, ctx, name, target):
-        self.ctx, self.name, self.target = ctx, name, target
+    def __init__(self, ctx, name, target, args=()):
+        self.ctx, self.name, self.target, self.args = ctx, name, target, args
         self.proc = None
         self.started = 0.0
         self.delay = cfg.RESTART_DELAY_MIN
         self.restart_at = None
 
     def start(self):
-        self.proc = self.ctx.Process(target=self.target, name=self.name, daemon=False)
+        self.proc = self.ctx.Process(target=self.target, args=self.args,
+                                     name=self.name, daemon=False)
         self.proc.start()
         self.started = time.monotonic()
         self.restart_at = None
@@ -103,7 +106,13 @@ def main():
     say("CamosunROV Pi starting -- Ctrl+C to stop")
     # "spawn": each part starts as a fresh Python process (nothing inherited from this one).
     ctx = mp.get_context("spawn")
-    parts = [Part(ctx, name, target) for name, target in PARTS.items()]
+    # Leak video cut-off, shared by both parts. Set = camera may stream.
+    # The bridge clears it while the STM32 is in leak shutdown and sets it again
+    # once a recover command has cleared the shutdown; the camera follows it.
+    # It lives here so it survives either part being restarted.
+    video_enabled = ctx.Event()
+    video_enabled.set()
+    parts = [Part(ctx, name, target, args=(video_enabled,)) for name, target in PARTS.items()]
     try:
         for part in parts:
             part.start()

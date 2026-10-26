@@ -13,6 +13,10 @@ when the camera is swapped. Check which camera the Pi sees with:
 UDP is "fire and forget": the Pi keeps sending whether or not anyone is
 watching, and the laptop can join at any time (SPS/PPS are repeated every
 I-frame so the decoder can start mid-stream).
+
+Leak cut-off: while the shared video_enabled flag (main.py) is clear, which the
+bridge does during a leak shutdown, the stream is stopped and the camera
+closed. It reopens when a recover command clears the shutdown.
 """
 
 import os
@@ -31,7 +35,15 @@ def say(msg):
     sys.stdout.flush()
 
 
-def stream_once():
+LEAK_POLL_S = 0.2        # s   how often the stream loop checks the leak video flag
+
+
+def video_allowed(video_enabled):
+    return video_enabled is None or video_enabled.is_set()
+
+
+def stream_once(video_enabled=None):
+    """Streams until an error (raises) or a leak cut-off (returns normally)."""
     # Imported here so a missing camera library shows up as a clear [CAMERA]
     # error (and a retry) instead of a crash before anything prints.
     from libcamera import Transform
@@ -80,7 +92,10 @@ def stream_once():
         picam2.start_recording(encoder, output)
         recording = True
         last_frame[0] = time.monotonic()
-        while not failed.wait(1.0):
+        while not failed.wait(LEAK_POLL_S):
+            if not video_allowed(video_enabled):
+                say("!!! LEAK -- stopping video stream (camera closed until a recover clears it) !!!")
+                return                        # finally: stop_recording() + close()
             waited = time.monotonic() - last_frame[0]
             limit = cfg.CAMERA_STALL_TIMEOUT if frames[0] else cfg.CAMERA_START_TIMEOUT
             if waited > limit:
@@ -99,8 +114,22 @@ def stream_once():
             picam2.close()
 
 
-def run():
-    """Process entry point used by main.py. Keeps retrying if the camera or network hiccups."""
+def wait_for_video_allowed(video_enabled):
+    """Blocks while the leak cut-off is active. Short waits so Ctrl+C / SIGTERM still work."""
+    if video_allowed(video_enabled):
+        return
+    say("Video off (leak) -- waiting for a recover command to clear the leak shutdown")
+    while not video_enabled.wait(0.5):
+        pass
+    say("*** Leak shutdown cleared -- restarting video stream ***")
+
+
+def run(video_enabled=None):
+    """Process entry point used by main.py. Keeps retrying if the camera or network hiccups.
+
+    video_enabled: shared flag from main.py, cleared by the bridge during a leak
+    shutdown. While it is clear the camera is closed and nothing is streamed.
+    """
     def on_sigterm(signum, frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, on_sigterm)
@@ -109,7 +138,10 @@ def run():
     last_error = None
     while True:
         try:
-            stream_once()
+            wait_for_video_allowed(video_enabled)
+            stream_once(video_enabled)
+            last_error = None                 # stopped for a leak, not an error
+            continue
         except KeyboardInterrupt:
             say("Stopped")
             return
