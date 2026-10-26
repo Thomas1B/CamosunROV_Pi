@@ -14,6 +14,21 @@ It works together with **CamosunROV_STM32** (motor control and sensors) and **Ca
 
 ---
 
+## Files
+
+| File | What it is |
+|---|---|
+| `main.py` | The one program to run. Starts and supervises the bridge and camera processes |
+| `rov/bridge.py` | Command centre (UDP) ⇄ STM32 (UART): commands, reference values, telemetry, failsafe, leak video cut-off |
+| `rov/camera.py` | Pi camera → H.264 → MPEG-TS over UDP, with a frame watchdog |
+| `rov/UART_DMA.py` | UART frame format. Must match `UART_DMA.h/.c` in CamosunROV_STM32 |
+| `rov/settings.py` | All IP addresses, ports, rates, timeouts and camera settings |
+| `Test_UART_DMA.py` | Stand-alone STM32 link test (no command centre or camera) |
+| `setup_pi.sh` | One-time Pi setup, safe to re-run |
+| `requiredPackages.txt` | Python package versions from a working Pi, for reference only. `setup_pi.sh` installs what the code needs (the camera stack from apt, `pyserial` with pip), so you do not need to `pip install` this file |
+
+---
+
 ## Hardware
 
 | Part | Notes |
@@ -83,10 +98,12 @@ bash setup_pi.sh          # run as your normal user, NOT with sudo
 4. Creates the `rov-tether` NetworkManager profile: `eth0` = `192.168.2.2/24`
 5. Creates the `ROV_venv` virtual environment (with system site packages, so it uses the apt camera stack) and installs `pyserial`
 6. Makes `main.py` and `Test_UART_DMA.py` executable and strips Windows line endings from their first line
-7. Disables services the ROV does not need, for a faster boot (SSH and Wi-Fi stay on)
+7. Disables services the ROV does not need, for a faster boot: `hciuart`, `bluetooth`, `ModemManager`, `NetworkManager-wait-online` (SSH and Wi-Fi stay on)
 8. Installs and enables the `rov` systemd service so `main.py` starts at every power-on
 
-It then asks whether to reboot. **A reboot is required** the first time for the UART and group changes to take effect. Over SSH, the session drops when the Pi reboots; that is expected. Wait about 1 min, then connect again.
+It then asks whether to reboot. **A reboot is required** the first time for the UART and group changes to take effect. Over SSH, the session drops when the Pi reboots; that is expected. Wait about 1 min, then connect again. If no reboot is needed (for example, re-running the script after pulling new code) and you answer `n`, the script restarts the `rov` service so the new code runs straight away.
+
+The `rov-tether` profile is not switched on while the script runs, so an SSH session over Ethernet is not dropped. It comes up by itself on the next boot or the next time the tether is plugged in.
 
 The command centre side (laptop IP and firewall) is covered in the CamosunROV_CommandCentre README.
 
@@ -144,7 +161,11 @@ Telemetry and command lines print at 2 Hz. Leak and fault changes, arm and disar
 
 ### How `main.py` works
 
-`main.py` runs the **bridge** and the **camera** as two separate processes. A camera crash or hang can never stop thruster control, and video encoding cannot disturb the 50 Hz UART timing. If either process stops, `main.py` restarts it after 2 s, doubling the delay up to 10 s if it keeps failing. The other process keeps running.
+`main.py` runs the **bridge** and the **camera** as two separate processes. A camera crash or hang can never stop thruster control, and video encoding cannot disturb the 50 Hz UART timing. If either process stops, `main.py` restarts it after 2 s, doubling the delay up to 10 s if it keeps failing (the delay goes back to 2 s once a process has run for 30 s). The other process keeps running. If `main.py` itself stops, systemd restarts the whole `rov` service after 2 s.
+
+The two processes share one flag, `video_enabled`. The bridge clears it during a leak shutdown, and the camera stops streaming until it is set again (see [Safety behaviour](#safety-behaviour)). The flag is owned by `main.py`, so it survives either process being restarted.
+
+The camera process also watches its own frames. If the camera starts but sends no first frame within 5 s (the HQ camera can do this at boot without raising any error), or frames stop for 3 s mid-stream, the camera process exits and `main.py` starts a fresh one. Any other camera error (camera not found, network write failed) is retried every 2 s.
 
 ### Testing the STM32 link alone
 
@@ -179,7 +200,13 @@ All settings are in [`rov/settings.py`](rov/settings.py). After changing one, re
 | `FPS` | 30 frame/s | Camera frame rate |
 | `BITRATE` | 4 Mbit/s | H.264 bit rate (~4 % of the 100 Mbit/s tether link) |
 | `IPERIOD` | 15 frames | Interval between I-frames (0.5 s): faster recovery after packet loss |
-| `HFLIP` / `VFLIP` | `False` | Mirror or flip the image to suit how the camera is mounted |
+| `HFLIP` / `VFLIP` | `True` / `True` | Mirror or flip the image to suit how the camera is mounted. Both `True` = image rotated 180°, for a camera mounted upside down |
+| `CAMERA_RETRY_DELAY` | 2 s | Wait before reopening the camera after an error |
+| `CAMERA_START_TIMEOUT` | 5 s | No first frame after starting → restart the camera process |
+| `CAMERA_STALL_TIMEOUT` | 3 s | Frames stop mid-stream for this long → restart the camera process |
+| `PRINT_PERIOD` | 0.5 s (2 Hz) | Console telemetry and command lines |
+| `WAIT_PRINT_PERIOD` | 2 s | Interval between "Waiting for …" console messages |
+| `RESTART_DELAY_MIN` / `RESTART_DELAY_MAX` | 2 s / 10 s | `main.py` restart delay for a stopped process, doubling each time it fails |
 
 ---
 
@@ -216,11 +243,11 @@ The Bar30 reference values set in the command centre's CONNECT dialog or **File 
 | 10 | `f32` | density | Water density, kg/m³ |
 | 14 | `u16` | crc16 | CRC-16/CCITT-FALSE over bytes 0 … 13 |
 
-Malformed or out-of-range packets (surface outside 800 … 1100 hPa, density outside 900 … 1100 kg/m³) are dropped. A new `ref_seq` is forwarded to the STM32 as a reference frame (below) and then reported back as `ref_ack` in the telemetry. The command centre resends the packet every second until it sees that `ack`, so the values still arrive if the STM32 connects later or the Pi restarts. They are also re-sent to the STM32 whenever it reconnects.
+Malformed or out-of-range packets (surface outside 800 … 1100 hPa, density outside 900 … 1100 kg/m³) are dropped and counted in the console's `bad` packet count. A resend of values the Pi already has is ignored. A new `ref_seq` is forwarded to the STM32 as a reference frame (below) and then reported back as `ref_ack` in the telemetry. The command centre resends the packet every second until it sees that `ack`, so the values still arrive if the STM32 connects later or the Pi restarts. They are also re-sent to the STM32 whenever it reconnects.
 
 ### Telemetry: Pi → command centre
 
-UDP to port 5601 at the IP address of the most recent valid command packet. One JSON object per datagram, sent at 50 Hz (one per STM32 frame):
+UDP to port 5601 at the IP address of the most recent valid command packet. Nothing is sent until the first valid command packet arrives, because until then the Pi does not know where the command centre is. One JSON object per datagram, sent at 50 Hz (one per STM32 frame):
 
 ```json
 {"depth_m": 1.23, "pressure_kpa": 113.6, "water_c": 8.70, "internal_c": 31.2,
@@ -270,6 +297,7 @@ The Pi camera feed is H.264, encoded on the Pi 4's hardware encoder and sent as 
 - **Leak video cut-off:** as soon as a telemetry frame shows the leak sensor wet or the leak shutdown latched (`FAULT_LEAK`), the Pi stops the camera stream and closes the camera. When a recover command clears the shutdown (sensor dry), the stream restarts by itself within about 1 s to 2 s. A recover sent while the sensor is still wet is refused, and the video stays off; release recover and press it again once dry. If the STM32 link drops during a leak, the video stays off.
 - **Clean exit:** Ctrl+C or `systemctl stop rov` sends three stop frames (thrusters 0 %, camera level) before the UART closes.
 - **Process isolation:** the bridge and the camera run as separate processes (`multiprocessing`), so a camera crash or hang cannot affect thruster control.
+- **STM32-side timeout:** the Pi keeps sending command frames at 50 Hz even when the command centre is lost (with thrusters at 0 %), so the STM32's own UART timeout (`FAULT_UART`) only trips if the Pi software itself stops.
 
 ---
 
@@ -282,6 +310,9 @@ The Pi camera feed is H.264, encoded on the Pi 4's hardware encoder and sent as 
 | `Waiting for connection to STM32...` | STM32 power, UART wiring (TX ↔ RX crossed, common GND), STM32 firmware running |
 | `Waiting for command centre...` | `ping 192.168.2.2` from the laptop; check the IP/port in the console's CONNECT dialog |
 | One sensor reads `null` / `--` | That sensor's fault bit is set; see `faults` in the telemetry |
-| No video | Read the `[CAMERA]` lines. Run `rpicam-hello --list-cameras` |
+| No video | Read the `[CAMERA]` lines. Run `rpicam-hello --list-cameras` (stop the `rov` service first; only one program can open the camera) |
+| `[CAMERA] !!! Camera never sent a frame` | Usually the HQ camera failing to start at boot; it restarts by itself. If it repeats, check the ribbon cable and `dmesg \| grep -i unicam` |
+| `[CAMERA] Video off (leak)` | Expected during a leak shutdown. Dry the sensor, then send recover from the command centre |
+| No telemetry at the command centre | The Pi only sends telemetry after it receives a valid command packet. Check the command centre is sending to `192.168.2.2:5600` and its firewall allows UDP 5601 and 5602 in |
 | `bad interpreter: ...^M` | Windows line endings: `sed -i 's/\r$//' main.py` (`setup_pi.sh` also fixes this) |
 | Image mirrored or upside down | `HFLIP` / `VFLIP` in `rov/settings.py` |
