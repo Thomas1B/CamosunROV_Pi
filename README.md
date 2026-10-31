@@ -156,7 +156,6 @@ Then connect again and answer `yes` when asked about the new key. Only do this w
 The Pi downloads updates from GitHub, so it needs internet access. Connect over **Wi-Fi**, not the tether: the tether only links the Pi to the laptop and has no internet.
 
 ```bash
-ssh pirov@camosunrov.local
 cd ~/CamosunROV_Pi
 git pull                  # download the latest code
 bash setup_pi.sh          # answer n to the reboot question
