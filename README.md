@@ -151,6 +151,33 @@ ssh-keygen -R 192.168.2.2
 
 Then connect again and answer `yes` when asked about the new key. Only do this when you know the Pi was re-flashed; if you see the warning without having re-flashed, find out why before connecting.
 
+### Updating to the latest code
+
+The Pi downloads updates from GitHub, so it needs internet access. Connect over **Wi-Fi**, not the tether: the tether only links the Pi to the laptop and has no internet.
+
+```bash
+ssh pirov@camosunrov.local
+cd ~/CamosunROV_Pi
+git pull                  # download the latest code
+bash setup_pi.sh          # answer n to the reboot question
+```
+
+`setup_pi.sh` skips everything that is already done. It applies any new setup steps, makes the scripts executable again, and restarts the `rov` service so the new code runs straight away. If you know the update only changed Python files, `sudo systemctl restart rov` is enough instead of `setup_pi.sh`.
+
+Check that it started cleanly with `journalctl -u rov -f` (Ctrl+C to stop watching).
+
+**Keep the Pi and STM32 in step.** If the update changed `rov/UART_DMA.py`, the UART frame format changed too, so flash the matching CamosunROV_STM32 firmware as well. With mismatched versions, every frame fails its checksum and the Pi keeps printing `Waiting for connection to STM32...`. For example, the watchdog update changed the telemetry frame from 20 bytes to 21 bytes, so the Pi code and the STM32 firmware have to be updated together.
+
+**If `git pull` refuses** with `Your local changes to the following files would be overwritten by merge` (usually `rov/settings.py` edited on the Pi):
+
+```bash
+git stash                 # put your local edits aside
+git pull
+git stash pop             # put them back on top of the new code
+```
+
+If `git stash pop` reports a conflict, open the file it names, keep the lines you want, and delete the `<<<<<<<`, `=======` and `>>>>>>>` markers. To throw your local edits away instead and use the GitHub version, run `git checkout -- rov/settings.py` before `git pull`.
+
 ---
 
 ## Running
@@ -166,6 +193,7 @@ You only need these commands if you want to check on the service or control it. 
 | See whether it's running | `systemctl status rov` |
 | Watch its live output | `journalctl -u rov -f` |
 | Apply changes after editing code or settings | `sudo systemctl restart rov` |
+| Get the latest code from GitHub | See [Updating to the latest code](#updating-to-the-latest-code) |
 | Stop it from starting at boot | `sudo systemctl disable rov` |
 | Stop it so you can run it by hand (below) | `sudo systemctl stop rov` |
 
