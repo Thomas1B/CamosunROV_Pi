@@ -188,6 +188,7 @@ Every console line is tagged with the process it came from:
 [BRIDGE] Started: UDP 5600 in / 5601 out  <->  /dev/serial0 @ 115200 baud
 [CAMERA] Started
 [BRIDGE] *** Connected to STM32 -- telemetry received (waited 0.1 s) ***
+[BRIDGE]     STM32 last reset: power-on / brown-out
 [CAMERA] *** Streaming: imx219  1920x1080 @ 30 fps, 4.0 Mbit/s -> 192.168.2.1:5602 ***
 [BRIDGE] *** Connected to command centre at 192.168.2.1 -- commands received ... ***
 [BRIDGE] [    52] Pressure: 101.3 kPa  Depth: 0.02 m  Water: 12.40 C  Battery: 16.10 V  ...
@@ -290,7 +291,8 @@ UDP to port 5601 at the IP address of the most recent valid command packet. Noth
 {"depth_m": 1.23, "pressure_kpa": 113.6, "water_c": 8.70, "internal_c": 31.2,
  "roll": 1.20, "pitch": -0.40, "yaw": 214.0, "voltage": 15.80,
  "leak": false, "faults": ["TEMP"], "fault_flags": 8, "stm32": true,
- "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3, "video_cut": false}
+ "stm32_reset": "POWER_ON", "uart_errors": 0, "ack": 1234, "rx_cmds": 5678,
+ "ref_ack": 3, "video_cut": false}
 ```
 
 Units: m, kPa, °C, degrees, V.
@@ -299,6 +301,7 @@ Units: m, kPa, °C, degrees, V.
 - When the STM32 is not answering, `"stm32"` is `false`, every sensor value is `null`, and heartbeats are sent at 10 Hz. That way the command centre can still tell that the tether and the Pi are working.
 - `ack` is the last command `seq` received, `rx_cmds` is the total number of valid commands, and `uart_errors` is the number of STM32 frames lost to checksum failures.
 - `ref_ack` is the `ref_seq` of the reference values last forwarded to the STM32 (`null` until the command centre has sent any).
+- `stm32_reset` is why the STM32 last restarted: `"POWER_ON"`, `"WATCHDOG"`, `"PIN"`, `"SOFTWARE"` or `"OTHER"` (see the reset cause table below). It keeps the same value until the STM32 restarts again, and is `null` while the STM32 is not answering. It is information, not a fault.
 - `video_cut` is `true` while the Pi has deliberately stopped the camera stream because of a leak (see Safety behaviour), so the command centre can tell that apart from a camera or network fault.
 
 ### UART frames: Pi ⇄ STM32
@@ -309,7 +312,19 @@ The frame format is defined in [`rov/UART_DMA.py`](rov/UART_DMA.py) and document
 |---|---|---|---|---|
 | Command | Pi → STM32 | 11 bytes | `0xAA` | Every 20 ms (50 Hz) |
 | Reference | Pi → STM32 | 10 bytes | `0xAB` | When the Bar30 reference values change (3 times), and when the STM32 reconnects |
-| Telemetry | STM32 → Pi | 20 bytes | `0xAA` | Every 20 ms |
+| Telemetry | STM32 → Pi | 21 bytes | `0xAA` | Every 20 ms |
+
+**Telemetry frame** (`START | pressure_x10 | depth_x100 | water_temp_x100 | battery_x100 | inside_temp_x100 | heading_x100 | roll_x100 | pitch_x100 | leak | fault_flags | reset_cause | CHECKSUM`):
+
+- `reset_cause` (byte 19) is why the STM32 last restarted. The STM32 reads it once from its RCC reset flags at boot and then sends it unchanged in every frame:
+
+| Value | JSON `stm32_reset` | Meaning |
+|:---:|---|---|
+| 0 | `POWER_ON` | Normal power-up, or the battery voltage dipped too low (brown-out) |
+| 1 | `WATCHDOG` | The STM32's independent watchdog (IWDG) fired because its main loop hung for about 0.5 s. Points to a firmware bug or a stuck I2C sensor; worth investigating |
+| 2 | `PIN` | Reset button, or the debugger / ST-LINK reset the chip |
+| 3 | `SOFTWARE` | `NVIC_SystemReset()` (not used by the firmware at the moment) |
+| 4 | `OTHER` | Window watchdog or low-power reset (neither is used) |
 
 **Reference frame** (`START_REF | surface_hpa_x100 (u32) | density_x10 (u16) | flags (u8) | ref_id (u8) | CHECKSUM`):
 
@@ -334,6 +349,7 @@ The Pi camera feed is H.264, encoded on the Pi 4's hardware encoder and sent as 
 - **Leak video cut-off:** as soon as a telemetry frame shows the leak sensor wet or the leak shutdown latched (`FAULT_LEAK`), the Pi stops the camera stream and closes the camera. When a recover command clears the shutdown (sensor dry), the stream restarts by itself within about 1 s to 2 s. A recover sent while the sensor is still wet is refused, and the video stays off; release recover and press it again once dry. If the STM32 link drops during a leak, the video stays off.
 - **Clean exit:** Ctrl+C or `systemctl stop rov` sends three stop frames (thrusters 0 %, camera level) before the UART closes.
 - **Process isolation:** the bridge and the camera run as separate processes (`multiprocessing`), so a camera crash or hang cannot affect thruster control.
+- **STM32 watchdog:** if the STM32 firmware hangs for about 0.5 s, its independent watchdog (IWDG) resets the chip. The thrusters stop while it reboots (about 1 s to 2 s). The Pi sees this as `STM32 connection lost`, then a reconnect, and prints `!!! STM32 was restarted by its WATCHDOG (IWDG) ...`. The reference values are re-sent automatically, and the command centre sees `"stm32_reset": "WATCHDOG"`.
 - **STM32-side timeout:** the Pi keeps sending command frames at 50 Hz even when the command centre is lost (with thrusters at 0 %), so the STM32's own UART timeout (`FAULT_UART`) only trips if the Pi software itself stops.
 
 ---
@@ -349,6 +365,7 @@ The Pi camera feed is H.264, encoded on the Pi 4's hardware encoder and sent as 
 | `[BRIDGE] !!! UDP port 5600 is already in use` | Another copy is running: `sudo systemctl stop rov` |
 | `Waiting for connection to STM32...` | STM32 power, UART wiring (TX ↔ RX crossed, common GND), STM32 firmware running |
 | `Waiting for command centre...` | `ping 192.168.2.2` from the laptop; check the IP/port in the console's CONNECT dialog |
+| `!!! STM32 was restarted by its WATCHDOG (IWDG)` | The STM32 main loop hung for about 0.5 s and the chip reset itself. Watch the STM32 SWO debug print (STM32CubeIDE, SWV ITM Data Console) to see where it hangs; a sensor holding the I2C bus is a common cause |
 | One sensor reads `null` / `--` | That sensor's fault bit is set; see `faults` in the telemetry |
 | No video | Read the `[CAMERA]` lines. Run `rpicam-hello --list-cameras` (stop the `rov` service first; only one program can open the camera) |
 | `[CAMERA] !!! Camera never sent a frame` | Usually the HQ camera failing to start at boot; it restarts by itself. If it repeats, check the ribbon cable and `dmesg \| grep -i unicam` |

@@ -3,7 +3,7 @@ Bridge: command centre (Ethernet/UDP) <-> Raspberry Pi <-> STM32 (UART).
 
     laptop --UDP 5600, 16-byte command packet, 50 Hz--> Pi --UART 11-byte frame, 50 Hz--> STM32
     laptop --UDP 5600, 16-byte reference packet-------> Pi --UART 10-byte frame, on change> STM32
-    laptop <--UDP 5601, JSON telemetry, 50 Hz---------- Pi <--UART 20-byte frame, 50 Hz-- STM32
+    laptop <--UDP 5601, JSON telemetry, 50 Hz---------- Pi <--UART 21-byte frame, 50 Hz-- STM32
 
 Started by main.py in its own process. The UART side reuses rov/UART_DMA.py
 unchanged (the same code Test_UART_DMA.py uses). Only one program can use
@@ -14,6 +14,8 @@ Console output (same style as Test_UART_DMA.py), every line tagged [BRIDGE]:
       is not connected, one message when each connects, one if it is lost
     - telemetry + command lines at PRINT_PERIOD (2 Hz)
     - leak / fault changes and ARM / DISARM straight away
+    - why the STM32 last restarted, each time it (re)connects; a watchdog
+      (IWDG) reset is printed as a warning
 
 -----------------------------------------------------------------------------
 COMMAND PACKET  laptop -> Pi  (matches command_center_py/link.py)
@@ -54,8 +56,15 @@ TELEMETRY  Pi -> laptop
     {"depth_m": 1.23, "pressure_kpa": 113.6, "water_c": 8.70, "internal_c": 31.2,
      "roll": 1.20, "pitch": -0.40, "yaw": 214.0, "voltage": 15.80,
      "leak": false, "faults": ["TEMP"], "fault_flags": 8, "stm32": true,
-     "uart_errors": 0, "ack": 1234, "rx_cmds": 5678, "ref_ack": 3, "video_cut": false}
+     "stm32_reset": "POWER_ON", "uart_errors": 0, "ack": 1234, "rx_cmds": 5678,
+     "ref_ack": 3, "video_cut": false}
     SI units throughout: m, kPa, degC, deg, V.
+    stm32_reset is why the STM32 last restarted: "POWER_ON" (power-up or
+    brown-out), "WATCHDOG" (its IWDG fired because the firmware hung for
+    ~0.5 s), "PIN" (reset button / debugger), "SOFTWARE" or "OTHER". It stays
+    the same until the STM32 restarts again. It is information, not a fault:
+    the STM32 is already running normally again when it is sent. null while
+    the STM32 is not answering.
     video_cut is true while the camera stream is deliberately off because of a
     leak (see LEAK VIDEO CUT-OFF), so the command centre can tell that apart
     from a camera or network failure.
@@ -95,7 +104,8 @@ import time
 import serial
 
 from rov.UART_DMA import (build_cmd_frame, build_ref_frame, TelemetryReader,
-                          FAULT_LEAK, FAULT_IMU, FAULT_DEPTH, FAULT_TEMP)
+                          FAULT_LEAK, FAULT_IMU, FAULT_DEPTH, FAULT_TEMP,
+                          RESET_CAUSE_WATCHDOG, describe_reset_cause)
 from rov import settings as cfg
 
 # ---------------- command packet (must match command_center_py/link.py) ----------------
@@ -184,6 +194,7 @@ def telem_to_json_dict(t):
         "leak": t["leak"],
         "faults": t["faults"],
         "fault_flags": t["fault_flags"],
+        "stm32_reset": t["reset_cause_name"],
     }
     for bit, keys in STALE_KEYS.items():
         if t["fault_flags"] & bit:
@@ -393,6 +404,7 @@ class Bridge:
                     connected = True
                     say(f"*** Connected to STM32 -- telemetry received "
                         f"(waited {now - waiting_since:.1f} s) ***")
+                    report_reset_cause(frames[0]["reset_cause"])
                     with self.lock:           # it may have restarted: give it the reference values again
                         if self.refs is not None:
                             self.ref_pending = cfg.REF_UART_REPEATS
@@ -423,7 +435,8 @@ class Bridge:
                 if now - last_heartbeat >= cfg.HEARTBEAT_PERIOD:
                     last_heartbeat = now
                     msg = {k: None for k in SENSOR_KEYS}
-                    msg.update({"faults": [], "fault_flags": None, "stm32": False})
+                    msg.update({"faults": [], "fault_flags": None, "stm32_reset": None,
+                                "stm32": False})
                     self.send_telem(msg)
 
     def update_video(self, t):
@@ -534,10 +547,28 @@ def print_telemetry(frames, telem, checksum_errors):
     )
 
 
+def report_reset_cause(cause):
+    """Says why the STM32 last restarted. Called each time the STM32 (re)connects,
+    because a restart always shows up as a lost link first (its boot sequence
+    takes longer than STM32_TIMEOUT)."""
+    if cause == RESET_CAUSE_WATCHDOG:
+        say("!!! STM32 was restarted by its WATCHDOG (IWDG): its main loop hung for "
+            "~0.5 s (firmware bug or stuck I2C sensor). Thrusters stopped during the "
+            "restart. Check the STM32 SWO debug print !!!")
+    else:
+        say(f"    STM32 last reset: {describe_reset_cause(cause)}")
+
+
 def report_state_change(prev, telem):
-    """Prints leak / fault changes as soon as they happen."""
+    """Prints leak / fault / reset-cause changes as soon as they happen."""
     if prev is None:
         return
+    # reset_cause only changes when the STM32 restarts. A restart normally drops
+    # the link first (and is reported on reconnect), so this only catches one
+    # quick enough to slip inside STM32_TIMEOUT.
+    if telem["reset_cause"] != prev["reset_cause"]:
+        say("*** STM32 restarted without the link dropping ***")
+        report_reset_cause(telem["reset_cause"])
     if telem["leak"] != prev["leak"]:
         if telem["leak"]:
             say("!!! LEAK SENSOR WET -- STM32 has shut down thrusters and tilt servo !!!")

@@ -8,7 +8,8 @@ prints a "waiting for connection" message every WAIT_PRINT_PERIOD seconds.
 It reports once when the connection comes up, and once if it is lost.
 
 Leak / fault changes are reported immediately (not held back by the 2 Hz
-print rate).
+print rate). Each time the STM32 (re)connects, the reason it last restarted
+is printed; a watchdog (IWDG) reset is printed as a warning.
 
 Keyboard (type the letter, then press Enter):
     r  -> send a recover command to clear a leak shutdown. The STM32 only
@@ -29,7 +30,8 @@ import serial
 import time
 import threading
 
-from rov.UART_DMA import build_cmd_frame, TelemetryReader, FAULT_LEAK
+from rov.UART_DMA import (build_cmd_frame, TelemetryReader, FAULT_LEAK,
+                          RESET_CAUSE_WATCHDOG, describe_reset_cause)
 
 CMD_PERIOD = 1/50        # s -> 50 Hz command rate
 PRINT_PERIOD = 1/2       # s -> print telemetry at 2 Hz so the terminal stays readable
@@ -80,10 +82,22 @@ def print_telemetry(frames, telem):
     )
 
 
+def report_reset_cause(cause):
+    """Says why the STM32 last restarted (printed on every (re)connect)."""
+    if cause == RESET_CAUSE_WATCHDOG:
+        print("!!! STM32 was restarted by its WATCHDOG (IWDG): its main loop hung "
+              "for ~0.5 s. Check the STM32 SWO debug print !!!")
+    else:
+        print(f"    STM32 last reset: {describe_reset_cause(cause)}")
+
+
 def report_state_change(prev, telem):
-    """Prints leak / fault changes as soon as they happen."""
+    """Prints leak / fault / reset-cause changes as soon as they happen."""
     if prev is None:
         return
+    if telem["reset_cause"] != prev["reset_cause"]:
+        print("*** STM32 restarted without the link dropping ***")
+        report_reset_cause(telem["reset_cause"])
     if telem["leak"] != prev["leak"]:
         if telem["leak"]:
             print("!!! LEAK SENSOR WET -- STM32 has shut down thrusters and tilt servo !!!")
@@ -124,6 +138,7 @@ def rx_loop():
                 connected = True
                 print(f"*** Connected to STM32 -- telemetry received "
                       f"(waited {now - waiting_since:.1f} s) ***")
+                report_reset_cause(new_frames[0]["reset_cause"])
 
             for telem in new_frames:
                 frames += 1

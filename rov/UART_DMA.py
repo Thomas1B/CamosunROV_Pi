@@ -7,10 +7,10 @@ Command frame (Pi -> STM32), 11 bytes:
 Reference frame (Pi -> STM32), 10 bytes -- Bar30 reference values, sent only when they change:
     START_REF | surface_hpa_x100 (u32) | density_x10 (u16) | flags (u8) | ref_id (u8) | CHECKSUM
 
-Telemetry frame (STM32 -> Pi), 20 bytes:
+Telemetry frame (STM32 -> Pi), 21 bytes:
     START | pressure_x10 (u16) | depth_x100 (i16) | water_temp_x100 (i16) | battery_x100 (u16)
           | inside_temp_x100 (i16) | heading_x100 (u16) | roll_x100 (i16) | pitch_x100 (i16)
-          | leak (u8) | fault_flags (u8) | CHECKSUM
+          | leak (u8) | fault_flags (u8) | reset_cause (u8) | CHECKSUM
 
 cam_tilt_dc: camera tilt x10 (deci-degrees), 0 = level, + = up.
 No clamping on the Pi -- values are sent as given and the STM32's motor/tilt
@@ -29,6 +29,14 @@ fault_flags: the STM32's SystemState_t bit flags that are active RIGHT NOW
              value -- ignore it.
     `leak` says whether there is water NOW; FAULT_LEAK says the ROV is in
     leak shutdown (thrusters and tilt servo off) until recovered.
+reset_cause: why the STM32 last restarted (see RESET_CAUSE_* below). Read once
+             from the RCC reset flags at boot and sent unchanged in every
+             frame until the next reset, so the Pi sees it whenever it
+             (re)connects. Information only, NOT a fault: by the time it is
+             sent, the STM32 has already recovered. RESET_CAUSE_WATCHDOG means
+             the independent watchdog (IWDG) fired because the STM32's main
+             loop hung for ~0.5 s -- a firmware bug or a stuck I2C bus, worth
+             investigating.
 
 pressure_x10: absolute Bar30 pressure in kPa x10 (0.1 kPa steps, numerically
              the same as hPa). Raw sensor reading, NOT minus the surface
@@ -91,15 +99,15 @@ START_REF_BYTE = 0xAB        # reference frame (Pi -> STM32)
 # struct format strings (excluding START and CHECKSUM, which we handle separately)
 _CMD_BODY_FMT = "<6bhB"          # 6x motor(i8), cam_tilt_dc(i16), recover(u8)
 _REF_BODY_FMT = "<IHBB"         # surface_hpa_x100(u32), density_x10(u16), flags(u8), ref_id(u8)
-_TELEM_BODY_FMT = "<HhhHhHhhBB"  # pressure_x10(u16), depth_x100(i16), water_temp_x100(i16), battery_x100(u16),
-                                 # inside_temp_x100(i16), heading_x100(u16), roll_x100(i16),
-                                 # pitch_x100(i16), leak(u8), fault_flags(u8)
+_TELEM_BODY_FMT = "<HhhHhHhhBBB"  # pressure_x10(u16), depth_x100(i16), water_temp_x100(i16), battery_x100(u16),
+                                  # inside_temp_x100(i16), heading_x100(u16), roll_x100(i16),
+                                  # pitch_x100(i16), leak(u8), fault_flags(u8), reset_cause(u8)
 
 TELEM_SCALE = 100.0          # telemetry wire value = real value x TELEM_SCALE
 PRESSURE_SCALE = 10.0        # except pressure: wire value = kPa x PRESSURE_SCALE
 
 CMD_FRAME_SIZE = 1 + struct.calcsize(_CMD_BODY_FMT) + 1      # 11
-TELEM_FRAME_SIZE = 1 + struct.calcsize(_TELEM_BODY_FMT) + 1  # 20
+TELEM_FRAME_SIZE = 1 + struct.calcsize(_TELEM_BODY_FMT) + 1  # 21
 REF_FRAME_SIZE = 1 + struct.calcsize(_REF_BODY_FMT) + 1      # 10 (must stay < CMD_FRAME_SIZE)
 
 REF_FLAG_SECOND_ORDER = 1 << 0
@@ -120,6 +128,21 @@ FAULT_NAMES = {
     FAULT_UART: "UART",
 }
 
+# Why the STM32 last restarted -- must match reset_cause_t in UART_DMA.h.
+RESET_CAUSE_POWER_ON = 0   # power-on, or brown-out (battery dipped too low)
+RESET_CAUSE_WATCHDOG = 1   # IWDG timeout: the STM32's main loop hung for ~0.5 s
+RESET_CAUSE_PIN = 2        # NRST pin: reset button or debugger / ST-LINK
+RESET_CAUSE_SOFTWARE = 3   # NVIC_SystemReset() (not used by the firmware yet)
+RESET_CAUSE_OTHER = 4      # window watchdog / low-power reset (not used)
+
+RESET_CAUSE_NAMES = {
+    RESET_CAUSE_POWER_ON: "POWER_ON",
+    RESET_CAUSE_WATCHDOG: "WATCHDOG",
+    RESET_CAUSE_PIN: "PIN",
+    RESET_CAUSE_SOFTWARE: "SOFTWARE",
+    RESET_CAUSE_OTHER: "OTHER",
+}
+
 
 def checksum8(data: bytes) -> int:
     """Simple additive checksum: sum of all bytes, wrapped to 8 bits."""
@@ -129,6 +152,23 @@ def checksum8(data: bytes) -> int:
 def decode_faults(flags: int) -> list[str]:
     """Turns a fault_flags byte into a list of names, e.g. 0x09 -> ['LEAK', 'TEMP']."""
     return [name for bit, name in FAULT_NAMES.items() if flags & bit]
+
+
+def decode_reset_cause(cause: int) -> str:
+    """Turns a reset_cause byte into a name, e.g. 1 -> 'WATCHDOG'. Unknown values
+    (newer firmware) come back as 'UNKNOWN(n)' instead of raising."""
+    return RESET_CAUSE_NAMES.get(cause, f"UNKNOWN({cause})")
+
+
+def describe_reset_cause(cause: int) -> str:
+    """One-line, human-readable explanation of a reset_cause byte for the console."""
+    return {
+        RESET_CAUSE_POWER_ON: "power-on / brown-out",
+        RESET_CAUSE_WATCHDOG: "WATCHDOG (IWDG) -- the STM32 firmware hung for ~0.5 s",
+        RESET_CAUSE_PIN: "reset pin (button or debugger)",
+        RESET_CAUSE_SOFTWARE: "software reset",
+        RESET_CAUSE_OTHER: "other (WWDG / low-power)",
+    }.get(cause, f"unknown reset cause {cause}")
 
 
 def build_cmd_frame(motors: list[int], cam_tilt_deg: float = 0.0,
@@ -179,7 +219,8 @@ def parse_telem_frame(frame: bytes):
         return None
 
     (pressure_x10, depth_x100, water_temp_x100, battery_x100, inside_temp_x100,
-     heading_x100, roll_x100, pitch_x100, leak, fault_flags) = struct.unpack(_TELEM_BODY_FMT, body)
+     heading_x100, roll_x100, pitch_x100, leak, fault_flags,
+     reset_cause) = struct.unpack(_TELEM_BODY_FMT, body)
 
     return {
         "pressure_kpa": pressure_x10 / PRESSURE_SCALE,
@@ -193,6 +234,8 @@ def parse_telem_frame(frame: bytes):
         "leak": bool(leak),
         "fault_flags": fault_flags,
         "faults": decode_faults(fault_flags),
+        "reset_cause": reset_cause,
+        "reset_cause_name": decode_reset_cause(reset_cause),
     }
 
 
