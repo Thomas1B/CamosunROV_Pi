@@ -12,6 +12,8 @@ The Pi sits in the ROV between the surface command centre and the STM32F446RE. I
 
 It works together with **CamosunROV_STM32** (motor control and sensors) and **CamosunROV_CommandCentre** (the laptop console).
 
+The Pi runs **headless**: Raspberry Pi OS Lite, no monitor or keyboard. All setup and maintenance is done from a laptop over SSH.
+
 ---
 
 ## Files
@@ -33,7 +35,7 @@ It works together with **CamosunROV_STM32** (motor control and sensors) and **Ca
 
 | Part | Notes |
 |---|---|
-| Raspberry Pi 4 | Raspberry Pi OS (Trixie), Lite or Desktop, user `pirov`, repo at `/home/pirov/CamosunROV_Pi` |
+| Raspberry Pi 4 | Raspberry Pi OS Lite (Trixie), headless (no monitor or keyboard), user `pirov`, repo at `/home/pirov/CamosunROV_Pi` |
 | Camera | Camera Module v2 (IMX219) now, HQ Camera (IMX477) later. No code changes needed to swap |
 | Tether | Blue Robotics Fathom tether, RJ45 on the Pi's `eth0` and on the command centre |
 | Battery | Blue Robotics Li-ion 4S 18 Ah (14.8 V nominal) |
@@ -53,39 +55,65 @@ It works together with **CamosunROV_STM32** (motor control and sensors) and **Ca
 
 ### 1. Flash the SD card
 
-Flash Raspberry Pi OS (Lite or Desktop) with Raspberry Pi Imager. After choosing the OS and SD card, open the OS customisation settings (**Edit Settings**) and set:
+Use the latest **Raspberry Pi Imager** (version 2.0 or later) from [raspberrypi.com/software](https://www.raspberrypi.com/software/). Imager walks you through one page at a time:
 
-| Setting | Value |
+1. **Device:** Raspberry Pi 4
+2. **OS:** Raspberry Pi OS (other) ▸ **Raspberry Pi OS Lite (64-bit)**
+3. **Storage:** your SD card
+4. **Customisation:** fill in each page as below
+
+| Customisation page | Value |
 |---|---|
 | Hostname | e.g. `camosunrov` |
-| Username / password | **`pirov`** / your choice |
-| Wireless LAN | Wi-Fi network name, password, and country `CA` |
-| Services tab | **Enable SSH**, use password authentication |
+| Localisation | Country: Canada (`CA`), time zone `America/Vancouver`, keyboard as you like |
+| User | Username **`pirov`**, password your choice |
+| Wi-Fi | Wi-Fi network name (SSID) and password |
+| Remote access | **Enable SSH**, use password authentication |
+| Raspberry Pi Connect | Skip (not used) |
+
+If Imager also shows a page for interface options, leave it as it is: `setup_pi.sh` configures the UART later.
+
+5. **Write:** check the summary page lists your hostname, user, Wi-Fi and "SSH enabled", then write the card.
+
+Because the Pi has no monitor or keyboard, these settings are the only way to get onto it the first time. Double-check them before writing the card: a typo in the Wi-Fi name or password, or SSH left off, means you cannot connect and have to re-flash.
 
 - **Username must be `pirov`.** The first line of `main.py` and `Test_UART_DMA.py` points to `/home/pirov/CamosunROV_Pi/ROV_venv/bin/python3`, so with any other username, or with the repo cloned somewhere else, `./main.py` fails with "bad interpreter".
 - **Hostname** can be anything; nothing in the code uses it, but you need it to connect over SSH.
 - **Password** can be anything, but remember it: `setup_pi.sh` asks for it once so it can use `sudo`, and SSH asks for it every time you connect.
-- **Wi-Fi** is needed for the first setup, to download the code and packages.
-- **SSH** is only needed if you have no monitor and keyboard for the Pi, but turn it on anyway: it is the easiest way to check on the Pi later, including over the tether.
+- **Wi-Fi** is needed for the first setup, to reach the Pi over SSH and to download the code and packages. It also lets you work on the Pi on the bench later without the tether.
+- **SSH is required.** It is the only way to reach a terminal on the Pi, both on the bench (over Wi-Fi) and during a dive (over the tether).
 
-### 2. Open a terminal on the Pi
+### 2. Connect to the Pi over SSH
 
-Boot the Pi and give it 1 min to 2 min to start and join the Wi-Fi. Then either:
+Put the SD card in the Pi, power it on, and give it 1 min to 2 min to start and join the Wi-Fi. Then, from a laptop on the same Wi-Fi network, open a terminal (PowerShell on Windows, Terminal on macOS or Linux) and connect:
 
-- **With a monitor and keyboard:** log in as `pirov` (on Desktop, open a terminal), or
-- **Headless, from a laptop on the same Wi-Fi network:** open a terminal (PowerShell on Windows, Terminal on macOS or Linux) and connect over SSH:
+```bash
+ssh pirov@camosunrov.local      # use your hostname
+```
 
-  ```bash
-  ssh pirov@camosunrov.local      # use your hostname
-  ```
+Answer `yes` the first time it asks about the host key, then enter the password. If `camosunrov.local` is not found (some school and campus networks block it), look up the Pi's IP address in the router's list of connected devices and use `ssh pirov@<that IP address>` instead.
 
-  Answer `yes` the first time it asks about the host key, then enter the password. If `camosunrov.local` is not found (some school and campus networks block it), look up the Pi's IP address in the router's list of connected devices and use `ssh pirov@<that IP address>` instead.
+If the Pi never shows up on the network, see [Troubleshooting](#troubleshooting).
 
 ### 3. Run the setup script
+
+In the SSH session, install `git` first. Raspberry Pi OS Lite doesn't include it, and you need it to download the repo (skipping this gives `git: command not found`):
+
+```bash
+sudo apt update
+sudo apt install -y git
+```
+
+Then download the repo:
 
 ```bash
 cd ~
 git clone https://github.com/Thomas1B/CamosunROV_Pi.git
+```
+
+Then run the setup script:
+
+```bash
 cd CamosunROV_Pi
 bash setup_pi.sh          # run as your normal user, NOT with sudo
 ```
@@ -101,7 +129,7 @@ bash setup_pi.sh          # run as your normal user, NOT with sudo
 7. Disables services the ROV does not need, for a faster boot: `hciuart`, `bluetooth`, `ModemManager`, `NetworkManager-wait-online` (SSH and Wi-Fi stay on)
 8. Installs and enables the `rov` systemd service so `main.py` starts at every power-on
 
-It then asks whether to reboot. **A reboot is required** the first time for the UART and group changes to take effect. Over SSH, the session drops when the Pi reboots; that is expected. Wait about 1 min, then connect again. If no reboot is needed (for example, re-running the script after pulling new code) and you answer `n`, the script restarts the `rov` service so the new code runs straight away.
+It then asks whether to reboot. **A reboot is required** the first time for the UART and group changes to take effect. The SSH session drops when the Pi reboots; that is expected. Wait about 1 min, then connect again. If no reboot is needed (for example, re-running the script after pulling new code) and you answer `n`, the script restarts the `rov` service so the new code runs straight away.
 
 The `rov-tether` profile is not switched on while the script runs, so an SSH session over Ethernet is not dropped. It comes up by itself on the next boot or the next time the tether is plugged in.
 
@@ -114,7 +142,14 @@ The command centre side (laptop IP and firewall) is covered in the CamosunROV_Co
 | Wi-Fi (on the bench) | Same Wi-Fi network as the Pi | `ssh pirov@camosunrov.local` |
 | Tether (ROV in the water) | Laptop's Ethernet port set to `192.168.2.1/24`, see the CamosunROV_CommandCentre README | `ssh pirov@192.168.2.2` |
 
-Over the tether, SSH runs alongside the command centre, so you can watch `journalctl -u rov -f` during a dive. After re-flashing the SD card, SSH refuses to connect with a "host key has changed" warning, because the Pi now has a new key. Clear the old one on the laptop with `ssh-keygen -R camosunrov.local` and `ssh-keygen -R 192.168.2.2`, then connect again.
+**After re-flashing the SD card**, SSH refuses to connect with `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!` and `Host key verification failed.` This is expected: the Pi made a new SSH key, and the laptop still remembers the old one. Clear the old keys on the laptop (PowerShell, Terminal on macOS or Linux):
+
+```bash
+ssh-keygen -R camosunrov.local
+ssh-keygen -R 192.168.2.2
+```
+
+Then connect again and answer `yes` when asked about the new key. Only do this when you know the Pi was re-flashed; if you see the warning without having re-flashed, find out why before connecting.
 
 ---
 
@@ -124,7 +159,7 @@ Over the tether, SSH runs alongside the command centre, so you can watch `journa
 
 ### Optional: checking on the service
 
-You only need these commands if you want to check on the service or control it. None of them are part of normal use. Run them on the Pi, directly or over SSH (see [Connecting after setup](#connecting-after-setup)).
+You only need these commands if you want to check on the service or control it. None of them are part of normal use. Run them on the Pi over SSH (see [Connecting after setup](#connecting-after-setup)).
 
 | If you want to… | Run |
 |---|---|
@@ -136,13 +171,15 @@ You only need these commands if you want to check on the service or control it. 
 
 ### Optional: running it by hand
 
-This is useful for debugging, when you want to see the output directly in your terminal. Stop the service first:
+This is useful for debugging, when you want to see the output directly in your SSH terminal. Stop the service first:
 
 ```bash
 sudo systemctl stop rov   # only one program can use /dev/serial0 and UDP 5600
 cd ~/CamosunROV_Pi
 ./main.py                 # Ctrl+C to stop; sends the STM32 a stop frame on exit
 ```
+
+If the SSH session drops while `main.py` is running by hand, the program stops with it. Run `sudo systemctl start rov` (or reboot the Pi) to bring the service back.
 
 Every console line is tagged with the process it came from:
 
@@ -182,7 +219,7 @@ While it is running, type `r` + Enter to send a leak-recover command, or `q` + E
 
 ## Configuration
 
-All settings are in [`rov/settings.py`](rov/settings.py). After changing one, restart with `sudo systemctl restart rov`.
+All settings are in [`rov/settings.py`](rov/settings.py). Edit it on the Pi over SSH (for example with `nano rov/settings.py`), then restart with `sudo systemctl restart rov`.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -305,6 +342,9 @@ The Pi camera feed is H.264, encoded on the Pi 4's hardware encoder and sent as 
 
 | Symptom | Check |
 |---|---|
+| Can't SSH in after first boot (`camosunrov.local` not found, and the Pi is not in the router's device list) | Wait the full 2 min. If it still doesn't appear, the Wi-Fi name or password (Wi-Fi page) or the country (Localisation page) was probably wrong in Imager: re-flash the SD card with the correct settings, using the latest Imager version |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED!` / `Host key verification failed` | Expected after re-flashing the SD card. Run `ssh-keygen -R 192.168.2.2` and `ssh-keygen -R camosunrov.local` on the laptop, then connect again (see [Connecting after setup](#connecting-after-setup)) |
+| `Connection refused` on port 22 | SSH was not enabled on Imager's Remote access page: re-flash with SSH on |
 | `[BRIDGE] !!! Cannot open /dev/serial0` | UART not enabled (re-run `setup_pi.sh` and reboot), user not in `dialout`, or `Test_UART_DMA.py` is running |
 | `[BRIDGE] !!! UDP port 5600 is already in use` | Another copy is running: `sudo systemctl stop rov` |
 | `Waiting for connection to STM32...` | STM32 power, UART wiring (TX ↔ RX crossed, common GND), STM32 firmware running |
