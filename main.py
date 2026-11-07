@@ -32,11 +32,11 @@ main.py (or the rov service) is running.
 """
 
 import multiprocessing as mp
-import signal
 import sys
 import time
 
 from rov import bridge, camera
+from rov.common import make_say, sigterm_as_ctrl_c, ignore_stop_signals
 from rov import settings as cfg
 
 PARTS = {
@@ -47,11 +47,7 @@ STABLE_S = 30.0          # a part that ran this long before stopping gets the sh
 STOP_TIMEOUT_S = 3.0     # wait this long for each part to shut down cleanly, then kill it
 
 
-def say(msg):
-    # One write per line, so lines from the bridge, camera and main processes
-    # never get mixed together on the shared console.
-    sys.stdout.write(f"[MAIN]   {msg}\n")
-    sys.stdout.flush()
+say = make_say("MAIN")
 
 
 class Part:
@@ -98,10 +94,7 @@ class Part:
 
 
 def main():
-    # systemctl stop sends SIGTERM: turn it into the same clean exit as Ctrl+C.
-    def on_sigterm(signum, frame):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, on_sigterm)
+    sigterm_as_ctrl_c()
 
     say("CamosunROV Pi starting -- Ctrl+C to stop")
     # "spawn": each part starts as a fresh Python process (nothing inherited from this one).
@@ -126,8 +119,7 @@ def main():
     finally:
         # Ignore further Ctrl+C / SIGTERM while shutting down, so the bridge
         # always gets to send its stop frame.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        ignore_stop_signals()
         say("Stopping...")
         for part in parts:                 # bridge first: thrusters stopped before anything else
             part.stop()

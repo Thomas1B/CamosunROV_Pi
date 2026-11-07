@@ -94,8 +94,6 @@ LEAK VIDEO CUT-OFF
 import binascii
 import errno
 import json
-import signal
-import sys
 import socket
 import struct
 import threading
@@ -107,6 +105,7 @@ from rov.UART_DMA import (build_cmd_frame, build_ref_frame, TelemetryReader,
                           FAULT_LEAK, FAULT_IMU, FAULT_DEPTH, FAULT_TEMP,
                           RESET_CAUSE_WATCHDOG, describe_reset_cause)
 from rov import settings as cfg
+from rov.common import make_say, sigterm_as_ctrl_c, ignore_stop_signals
 
 # ---------------- command packet (must match command_center_py/link.py) ----------------
 CMD_STRUCT = struct.Struct("<2sBBH6bbx")      # 14 bytes, then a 2-byte CRC
@@ -138,11 +137,7 @@ SENSOR_KEYS = ("depth_m", "pressure_kpa", "water_c", "internal_c",
                "roll", "pitch", "yaw", "voltage", "leak")
 
 
-def say(msg):
-    # One write per line, so lines from the bridge, camera and main processes
-    # never get mixed together on the shared console.
-    sys.stdout.write(f"[BRIDGE] {msg}\n")
-    sys.stdout.flush()
+say = make_say("BRIDGE")
 
 
 def parse_command(pkt: bytes):
@@ -213,6 +208,7 @@ class Bridge:
     def __init__(self, video_enabled=None):
         self.stop = threading.Event()
         self.lock = threading.Lock()
+        self.new_cmd = threading.Event()   # set by udp_rx_loop -> uart_tx_loop sends right away
         # Shared with the camera process (see main.py). None when run without main.py.
         self.video_enabled = video_enabled
 
@@ -297,6 +293,7 @@ class Bridge:
                 self.recover = recover
                 self.motors = motors
                 self.tilt_deg = float(tilt)
+            self.new_cmd.set()                # forward it to the STM32 now, not at the next tick
 
     def handle_reference(self, pkt):
         ref = parse_reference(pkt)
@@ -336,9 +333,19 @@ class Bridge:
         last_cmd_seen = time.monotonic()
         waiting_since = last_cmd_seen
         last_wait_print = float("-inf")
-        next_t = time.monotonic()
+        last_tx = float("-inf")
 
         while not self.stop.is_set():
+            # Send as soon as a new command packet arrives (no waiting for a timer tick),
+            # or after UART_PERIOD with none, so the STM32 still gets >= 50 Hz frames.
+            self.new_cmd.wait(max(0.0, last_tx + cfg.UART_PERIOD - time.monotonic()))
+            self.new_cmd.clear()
+            # Keep frames at least UART_MIN_GAP apart, so the STM32's idle-line DMA always
+            # sees them as separate frames even if command packets arrive in a burst.
+            gap = last_tx + cfg.UART_MIN_GAP - time.monotonic()
+            if gap > 0:
+                time.sleep(gap)
+
             now = time.monotonic()
             with self.lock:
                 cmd_live = self.cmd_up(now)
@@ -367,20 +374,15 @@ class Bridge:
 
             # One complete frame per write() -- the STM32 finds frames by idle line.
             self.ser.write(build_cmd_frame(motors=motors, cam_tilt_deg=tilt, recover=recover))
+            last_tx = now
 
-            # New Bar30 reference values: their own frame, half a period later, so there
-            # is an idle gap on both sides and the 50 Hz command frames are not disturbed.
+            # New Bar30 reference values: their own frame, UART_MIN_GAP later, so there
+            # is an idle gap on both sides of it.
             ref_frame = self.next_ref_frame(now)
             if ref_frame is not None:
-                time.sleep(cfg.UART_PERIOD / 2)
+                time.sleep(cfg.UART_MIN_GAP)
                 self.ser.write(ref_frame)
-
-            next_t += cfg.UART_PERIOD
-            delay = next_t - time.monotonic()
-            if delay < -cfg.UART_PERIOD:      # fell far behind (e.g. system stall): resync
-                next_t = time.monotonic()
-                delay = 0.0
-            time.sleep(max(0.0, delay))
+                last_tx = time.monotonic()
 
     # ---------------- STM32 -> Pi -> laptop ----------------
     def uart_rx_loop(self):
@@ -392,7 +394,14 @@ class Bridge:
         prev_telem = None
 
         while not self.stop.is_set():
-            data = self.ser.read(64)          # b"" after the 0.1 s timeout
+            # Take whatever has arrived (at least 1 byte, or b"" after the 0.1 s timeout).
+            # A fixed read(64) waited for 64 bytes = ~3 telemetry frames (~60 ms) first.
+            try:
+                data = self.ser.read(self.ser.in_waiting or 1)
+            except (serial.SerialException, OSError, TypeError):
+                if self.stop.is_set():
+                    return                    # port closed by shutdown(): exit quietly
+                raise
             # Only VALID frames (START + checksum ok) count as a connection --
             # random noise on an unplugged wire is rejected by the reader.
             frames = list(self.reader.feed(data)) if data else []
@@ -510,8 +519,7 @@ class Bridge:
     def shutdown(self):
         # Ctrl+C reaches this process AND main.py, which then also sends SIGTERM:
         # ignore both from here on so nothing interrupts the stop frames below.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        ignore_stop_signals()
         say("Stopping -- sending stop frame to STM32 (thrusters 0 %, camera level)")
         self.stop.set()
         try:
@@ -587,9 +595,7 @@ def report_state_change(prev, telem):
 
 def run(video_enabled=None):
     """Process entry point used by main.py. video_enabled: the shared leak video flag."""
-    def on_sigterm(signum, frame):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, on_sigterm)
+    sigterm_as_ctrl_c()
     try:
         bridge = Bridge(video_enabled)
     except KeyboardInterrupt:

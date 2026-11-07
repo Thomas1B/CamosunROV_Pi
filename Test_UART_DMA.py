@@ -125,7 +125,7 @@ def rx_loop():
     last_wait_print = float("-inf")    # so the first waiting message isn't delayed
 
     while not stop_event.is_set():
-        data = ser.read(64)            # returns b"" after the 0.1 s timeout if nothing came in
+        data = ser.read(ser.in_waiting or 1)   # what has arrived (>= 1 byte), b"" after the 0.1 s timeout
 
         # Only VALID frames (START + checksum ok) count as a connection --
         # random noise on an unplugged wire is rejected by the reader.

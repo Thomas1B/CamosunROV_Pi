@@ -20,19 +20,14 @@ closed. It reopens when a recover command clears the shutdown.
 """
 
 import os
-import signal
-import sys
 import threading
 import time
 
 from rov import settings as cfg
+from rov.common import make_say, sigterm_as_ctrl_c
 
 
-def say(msg):
-    # One write per line, so lines from the bridge, camera and main processes
-    # never get mixed together on the shared console.
-    sys.stdout.write(f"[CAMERA] {msg}\n")
-    sys.stdout.flush()
+say = make_say("CAMERA")
 
 
 LEAK_POLL_S = 0.2        # s   how often the stream loop checks the leak video flag
@@ -130,9 +125,13 @@ def run(video_enabled=None):
     video_enabled: shared flag from main.py, cleared by the bridge during a leak
     shutdown. While it is clear the camera is closed and nothing is streamed.
     """
-    def on_sigterm(signum, frame):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, on_sigterm)
+    sigterm_as_ctrl_c()
+    # Lower CPU priority than the bridge: the video muxing (PyAV, in Python) must
+    # never delay thruster frames. H.264 encoding itself is done in hardware.
+    try:
+        os.nice(cfg.CAMERA_NICE)
+    except OSError:
+        pass
 
     say("Started")
     last_error = None

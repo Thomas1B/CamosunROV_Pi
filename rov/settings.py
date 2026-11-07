@@ -17,7 +17,10 @@ SERIAL_PORT = "/dev/serial0"   # PL011 UART: dtoverlay=disable-bt in config.txt
 BAUD = 115200
 
 # ---------------- bridge timing ----------------
-UART_PERIOD = 1 / 50           # s   -> command frames to the STM32 at 50 Hz
+UART_PERIOD = 1 / 50           # s   longest time between command frames to the STM32 (>= 50 Hz).
+                               #     A new command packet is forwarded at once, without waiting.
+UART_MIN_GAP = 0.01            # s   shortest time between UART frames (idle gap for the STM32's
+                               #     idle-line DMA; also the gap before a reference frame)
 CMD_TIMEOUT = 0.25             # s   without a valid command packet -> thrusters zeroed
 STM32_TIMEOUT = 0.5            # s   without valid telemetry -> STM32 treated as not connected
                                #     (telemetry normally arrives every 0.02 s, so 0.5 s = 25 missed frames)
@@ -36,6 +39,8 @@ BITRATE = 4_000_000            # bit/s -- ~4 % of the 100 Mbit/s tether link
 IPERIOD = 15                   # frames between I-frames (0.5 s at 30 fps): faster recovery from loss
 HFLIP = True                  # set True if the image is mirrored once mounted
 VFLIP = True                  # set True (with HFLIP) if the camera is mounted upside down
+CAMERA_NICE = 10               # camera process CPU priority (0..19, higher = lower priority), so
+                               # video work can never delay the bridge's thruster frames
 CAMERA_RETRY_DELAY = 2.0       # s   before reopening the camera after an error
 CAMERA_START_TIMEOUT = 5.0     # s   no first frame after starting -> restart the camera process
                                #     (the HQ camera can fail to start at boot without any error)
